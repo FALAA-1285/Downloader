@@ -59,21 +59,31 @@ async def resolve_doh(host: str) -> list[str]:
         if now - cached_time < _DOH_CACHE_TTL:
             return cached_ips
 
-    url = f"https://dns.adguard-dns.com/resolve?name={host}"
+    endpoints = (
+        ("https://cloudflare-dns.com/dns-query?name={host}&type=A", {"Accept": "application/dns-json"}),
+        ("https://dns.adguard-dns.com/resolve?name={host}&type=A", {}),
+    )
     addresses: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                for ans in data.get("Answer", []):
-                    if ans.get("type") == 1:
-                        try:
-                            ip = ipaddress.ip_address(ans.get("data"))
-                            if is_public_ip(ip) and ip.compressed not in addresses:
-                                addresses.append(ip.compressed)
-                        except ValueError:
-                            continue
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for url_tmpl, headers in endpoints:
+                try:
+                    resp = await client.get(url_tmpl.format(host=host), headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for ans in data.get("Answer", []):
+                            if ans.get("type") == 1:
+                                raw_ip = str(ans.get("data", "")).strip()
+                                try:
+                                    ip = ipaddress.ip_address(raw_ip)
+                                    if is_public_ip(ip) and ip.compressed not in addresses:
+                                        addresses.append(ip.compressed)
+                                except ValueError:
+                                    continue
+                        if addresses:
+                            break
+                except Exception as exc:
+                    log.debug("DoH query gagal pada endpoint %s: %s", url_tmpl, exc)
     except Exception as exc:
         log.debug("DoH query gagal untuk %s: %s", host, exc)
 
