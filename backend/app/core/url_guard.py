@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -64,6 +65,14 @@ def _parse_ip(host: str) -> IPAddress | None:
         return None
 
 
+_NUMERIC_LABEL = re.compile(r"^(0x[0-9a-f]*|\d+)$", re.I)
+
+
+def _looks_numeric(host: str) -> bool:
+    labels = host.split(".")
+    return 1 < len(labels) <= 4 and all(_NUMERIC_LABEL.match(label) for label in labels)
+
+
 def validate_url(raw: str, allowed_ports: set[int]) -> ValidatedURL:
     """Validasi tanpa akses jaringan. Mengembalikan URL yang sudah dinormalisasi."""
     if not isinstance(raw, str) or not raw.strip():
@@ -103,6 +112,10 @@ def validate_url(raw: str, allowed_ports: set[int]) -> ValidatedURL:
         if "." not in host:
             # Host satu label (mis. "intranet", "2130706433") hampir selalu internal/numerik.
             raise UnsafeURLError(BLOCKED_MESSAGE)
+        if _looks_numeric(host):
+            # Bentuk IPv4 non-standar (hex "0x7f.0.0.1", oktal "0177.0.0.1", "127.1") ditafsirkan
+            # berbeda oleh tiap resolver; tolak sejak awal daripada mengandalkan resolusi.
+            raise UnsafeURLError("Format alamat IP tidak valid.", code="url_malformed")
         try:
             host = host.encode("idna").decode("ascii")
         except UnicodeError as exc:
@@ -142,3 +155,12 @@ async def resolve_public(host: str, port: int) -> list[str]:
     if not addresses:
         raise AppError("dns_failed", f"Domain {host} tidak memiliki alamat.", 422)
     return addresses
+
+
+def redact_url(url: str) -> str:
+    """URL tanpa query string dan fragment, untuk log/riwayat (query bisa memuat token)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))

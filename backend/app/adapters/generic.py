@@ -19,7 +19,7 @@ from app.extractors.common import (
 )
 from app.extractors.images import extract_images
 from app.extractors.media import extract_av, extract_subtitles
-from app.extractors.page import looks_like_login, needs_javascript, parse_html
+from app.extractors.page import has_login_form, is_login_url, needs_javascript, parse_html
 from app.extractors.probe import probe_candidates
 from app.extractors.text import extract_text, word_count
 
@@ -74,12 +74,15 @@ class GenericAdapter(Adapter):
             )
 
         words = word_count(text)
-        if looks_like_login(final_url, page, words):
+        if is_login_url(final_url):
             raise AppError(
                 "auth_required",
                 "Halaman ini membutuhkan login. Konten di balik autentikasi tidak dianalisis.",
                 422,
             )
+        if has_login_form(page, words):
+            # Bukan error: halaman bisa saja punya form login di header tetapi tetap berisi media publik.
+            warnings.append("Halaman memuat form login; konten yang membutuhkan login tidak dianalisis.")
         if needs_javascript(page, words):
             warnings.append("Halaman tampaknya dimuat dengan JavaScript; sebagian konten mungkin tidak terdeteksi.")
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import posixpath
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 IMAGE_EXT = {"jpg", "jpeg", "png", "gif", "webp", "svg", "avif"}
@@ -69,7 +69,6 @@ class Candidate:
     label: str | None = None
     preview_url: str | None = None
     probe: bool = True
-    extra: dict = field(default_factory=dict)
 
     @property
     def id(self) -> str:

@@ -59,6 +59,59 @@ DETECTED_LABEL = {
 SRT_HEAD = re.compile(r"^\s*\d+\s*\r?\n\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->", re.M)
 
 
+FTYP_BRANDS = {
+    **dict.fromkeys(
+        (
+            b"isom",
+            b"iso2",
+            b"iso4",
+            b"iso5",
+            b"iso6",
+            b"mp41",
+            b"mp42",
+            b"avc1",
+            b"dash",
+            b"mmp4",
+            b"M4V ",
+            b"M4VP",
+            b"f4v ",
+        ),
+        "mp4",
+    ),
+    b"qt  ": "mov",
+    b"M4A ": "m4a",
+    b"M4B ": "m4a",
+    b"avif": "avif",
+    b"avis": "avif",
+}
+
+SVG_PROLOG = re.compile(r"^(?:\s+|<\?xml[^>]*\?>|<!--.*?-->|<!DOCTYPE[^>]*>)*", re.S | re.I)
+
+
+def _is_mpeg_audio_frame(data: bytes) -> bool:
+    """Frame sync MPEG audio layer III: 11 bit 1, versi bukan 'reserved', layer III."""
+    return len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0 and (data[1] & 0x06) == 0x02
+
+
+def _mp3_after_id3(head: bytes) -> str | None:
+    """MP3 dengan tag ID3v2 harus diikuti frame MPEG audio, bukan konten lain (mis. playlist HLS)."""
+    if len(head) < 10:
+        return None
+    size = (head[6] & 0x7F) << 21 | (head[7] & 0x7F) << 14 | (head[8] & 0x7F) << 7 | (head[9] & 0x7F)
+    end = 10 + size + (10 if head[5] & 0x10 else 0)  # footer opsional
+    if end + 2 > len(head):
+        # Tag lebih besar dari potongan awal (mis. ada cover art). Isinya divalidasi ffprobe
+        # dengan format_whitelist=mp3, sehingga konten lain tetap ditolak.
+        return "mp3"
+    return "mp3" if _is_mpeg_audio_frame(head[end:]) else None
+
+
+def _svg_root(text: str) -> bool:
+    """Elemen root dokumen harus <svg>, bukan HTML yang kebetulan memuat <svg>."""
+    body = SVG_PROLOG.sub("", text[:4096], count=1)
+    return body[:4].lower() == "<svg"
+
+
 def detect(head: bytes) -> str | None:
     """Mendeteksi jenis file dari beberapa KB pertama."""
     if head.startswith(b"\xff\xd8\xff"):
@@ -72,21 +125,16 @@ def detect(head: bytes) -> str | None:
     if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return "wav"
     if head[4:8] == b"ftyp":
-        brand = head[8:12]
-        if brand in (b"avif", b"avis"):
-            return "avif"
-        if brand == b"qt  ":
-            return "mov"
-        if brand in (b"M4A ", b"M4B "):
-            return "m4a"
-        return "mp4"
+        return FTYP_BRANDS.get(head[8:12])  # brand tak dikenal (mis. HEIC) → ditolak
     if head.startswith(b"\x1a\x45\xdf\xa3"):
         return "webm" if b"webm" in head[:64] else "mkv"
     if head.startswith(b"OggS"):
         return "ogg"
     if head.startswith(b"fLaC"):
         return "flac"
-    if head.startswith(b"ID3") or (len(head) > 1 and head[0] == 0xFF and head[1] in (0xFB, 0xF3, 0xF2, 0xFA)):
+    if head.startswith(b"ID3"):
+        return _mp3_after_id3(head)
+    if _is_mpeg_audio_frame(head):
         return "mp3"
     if len(head) > 1 and head[0] == 0xFF and head[1] in (0xF1, 0xF9):
         return "aac"
@@ -105,7 +153,7 @@ def detect(head: bytes) -> str | None:
         return "ass"
     if SRT_HEAD.match(text):
         return "srt"
-    if "<svg" in lower and "<html" not in lower:
+    if _svg_root(text):
         return "svg"
     if "<tt" in lower and ("ttml" in lower or "w3.org/ns/ttml" in lower):
         return "ttml"

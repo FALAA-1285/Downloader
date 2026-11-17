@@ -3,15 +3,20 @@
 - Setiap koneksi TCP baru melewati `GuardedBackend.connect_tcp`, yang me-resolve DNS,
   menolak alamat non-publik, lalu terhubung ke IP yang sudah divalidasi. TLS/SNI tetap
   memakai nama host asli sehingga verifikasi sertifikat tidak terpengaruh.
+- `GuardedTransport` dibangun di atas API publik httpcore, sehingga guard tidak bergantung
+  pada atribut privat httpx.
 - Redirect diikuti manual agar setiap hop divalidasi ulang (skema, port, host).
+- Body didekompresi bertahap dengan batas per potongan (`iter_body`), sehingga respons
+  terkompresi kecil tidak bisa mengembang tanpa batas di memori.
 - Tidak memakai proxy dari environment, tidak meneruskan cookie antar permintaan.
 """
 
 from __future__ import annotations
 
 import ssl
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+import zlib
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from urllib.parse import urljoin
 
 import certifi
@@ -23,6 +28,35 @@ from .errors import AppError, TransientError, UnsafeURLError
 from .url_guard import resolve_public, validate_url
 
 REDIRECT_CODES = {301, 302, 303, 307, 308}
+BODY_CHUNK = 64 * 1024
+
+# Urutan penting: kelas spesifik sebelum kelas induk.
+_ERROR_MAP: tuple[tuple[type[Exception], type[httpx.TransportError]], ...] = (
+    (httpcore.ConnectTimeout, httpx.ConnectTimeout),
+    (httpcore.ReadTimeout, httpx.ReadTimeout),
+    (httpcore.WriteTimeout, httpx.WriteTimeout),
+    (httpcore.PoolTimeout, httpx.PoolTimeout),
+    (httpcore.TimeoutException, httpx.TimeoutException),
+    (httpcore.ConnectError, httpx.ConnectError),
+    (httpcore.ReadError, httpx.ReadError),
+    (httpcore.WriteError, httpx.WriteError),
+    (httpcore.NetworkError, httpx.NetworkError),
+    (httpcore.RemoteProtocolError, httpx.RemoteProtocolError),
+    (httpcore.LocalProtocolError, httpx.LocalProtocolError),
+    (httpcore.ProtocolError, httpx.ProtocolError),
+    (httpcore.UnsupportedProtocol, httpx.UnsupportedProtocol),
+)
+
+
+@contextmanager
+def _map_transport_errors(request: httpx.Request) -> Iterator[None]:
+    try:
+        yield
+    except Exception as exc:
+        for source, target in _ERROR_MAP:
+            if isinstance(exc, source):
+                raise target(str(exc), request=request) from exc
+        raise
 
 
 class GuardedBackend(httpcore.AsyncNetworkBackend):
@@ -59,19 +93,64 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
+class _ResponseStream(httpx.AsyncByteStream):
+    def __init__(self, stream: Iterable[bytes] | object, request: httpx.Request) -> None:
+        self._stream = stream
+        self._request = request
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        with _map_transport_errors(self._request):
+            async for part in self._stream:  # type: ignore[attr-defined]
+                yield part
+
+    async def aclose(self) -> None:
+        close = getattr(self._stream, "aclose", None)
+        if close is not None:
+            await close()
+
+
+class GuardedTransport(httpx.AsyncBaseTransport):
+    """Transport httpx yang memakai pool httpcore dengan `GuardedBackend`."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(cafile=certifi.where()),
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=5.0,
+            http1=True,
+            http2=False,
+            retries=0,
+            network_backend=GuardedBackend(settings.port_allowlist),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,  # type: ignore[arg-type]
+            extensions=request.extensions,
+        )
+        with _map_transport_errors(request):
+            response = await self._pool.handle_async_request(core_request)
+        return httpx.Response(
+            status_code=response.status,
+            headers=response.headers,
+            stream=_ResponseStream(response.stream, request),
+            extensions=response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
+
+
 def build_client(settings: Settings, *, read_timeout: float | None = None) -> httpx.AsyncClient:
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-    transport = httpx.AsyncHTTPTransport(retries=0)
-    # httpx tidak mengekspos `network_backend`, jadi pool diganti dengan yang memakai GuardedBackend.
-    transport._pool = httpcore.AsyncConnectionPool(  # noqa: SLF001
-        ssl_context=ssl_context,
-        max_connections=20,
-        max_keepalive_connections=10,
-        keepalive_expiry=5.0,
-        http1=True,
-        http2=False,
-        network_backend=GuardedBackend(settings.port_allowlist),
-    )
     timeout = httpx.Timeout(
         connect=settings.connect_timeout_seconds,
         read=read_timeout or settings.read_timeout_seconds,
@@ -79,13 +158,15 @@ def build_client(settings: Settings, *, read_timeout: float | None = None) -> ht
         pool=settings.connect_timeout_seconds,
     )
     return httpx.AsyncClient(
-        transport=transport,
+        transport=GuardedTransport(settings),
         timeout=timeout,
         follow_redirects=False,
         trust_env=False,
         headers={
             "User-Agent": settings.user_agent,
             "Accept-Language": "id,en;q=0.8",
+            # Hanya encoding yang bisa didekompresi bertahap dengan batas (lihat iter_body).
+            "Accept-Encoding": "gzip, deflate",
         },
     )
 
@@ -105,7 +186,10 @@ async def open_stream(
     """
     current = validate_url(url, settings.port_allowlist).url
     for _hop in range(settings.max_redirects + 1):
-        request = client.build_request(method, current, headers=headers)
+        try:
+            request = client.build_request(method, current, headers=headers)
+        except httpx.InvalidURL as exc:
+            raise UnsafeURLError("Format URL tidak valid.", code="url_malformed") from exc
         try:
             response = await client.send(request, stream=True)
         except httpx.HTTPError as exc:
@@ -131,20 +215,54 @@ async def open_stream(
     raise AppError("too_many_redirects", "Terlalu banyak pengalihan (redirect) dari sumber.", 502)
 
 
-async def read_limited(response: httpx.Response, max_bytes: int) -> tuple[bytes, bool]:
-    """Membaca body sampai `max_bytes`. Mengembalikan (data, terpotong)."""
-    chunks: list[bytes] = []
-    total = 0
+def _decoder(content_encoding: str | None):
+    encoding = (content_encoding or "").strip().lower()
+    if encoding in ("", "identity"):
+        return None
+    if encoding in ("gzip", "x-gzip"):
+        return zlib.decompressobj(16 + zlib.MAX_WBITS)
+    if encoding == "deflate":
+        return zlib.decompressobj()
+    raise AppError("unsupported_encoding", f"Sumber memakai encoding {encoding} yang tidak didukung.", 502)
+
+
+def is_encoded(response: httpx.Response) -> bool:
+    return (response.headers.get("content-encoding") or "identity").strip().lower() not in ("", "identity")
+
+
+async def iter_body(response: httpx.Response, chunk_size: int = BODY_CHUNK) -> AsyncIterator[bytes]:
+    """Body yang sudah didekode; setiap potongan paling besar `chunk_size` byte."""
+    decoder = _decoder(response.headers.get("content-encoding"))
     try:
-        async for chunk in response.aiter_bytes():
-            remaining = max_bytes - total
-            if len(chunk) >= remaining:
-                chunks.append(chunk[:remaining])
-                return b"".join(chunks), True
-            chunks.append(chunk)
-            total += len(chunk)
+        async for raw in response.aiter_raw(chunk_size):
+            if decoder is None:
+                yield raw
+                continue
+            data = raw
+            while True:
+                out = decoder.decompress(data, chunk_size)
+                if out:
+                    yield out
+                data = decoder.unconsumed_tail
+                if not data and len(out) < chunk_size:
+                    break
     except httpx.HTTPError as exc:
         raise map_http_error(exc, str(response.url)) from exc
+    except zlib.error as exc:
+        raise AppError("decode_error", "Respons terkompresi dari sumber rusak.", 502) from exc
+
+
+async def read_limited(response: httpx.Response, max_bytes: int) -> tuple[bytes, bool]:
+    """Membaca body (sudah didekode) sampai `max_bytes`. Mengembalikan (data, terpotong)."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in iter_body(response):
+        remaining = max_bytes - total
+        if len(chunk) >= remaining:
+            chunks.append(chunk[:remaining])
+            return b"".join(chunks), True
+        chunks.append(chunk)
+        total += len(chunk)
     return b"".join(chunks), False
 
 

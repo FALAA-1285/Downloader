@@ -68,9 +68,13 @@ def _clean(value: str | None, limit: int) -> str | None:
     return text[:limit] or None
 
 
-def looks_like_login(final_url: str, page: ParsedPage, word_count: int) -> bool:
-    if LOGIN_PATH.search(final_url):
-        return True
+def is_login_url(final_url: str) -> bool:
+    """Sumber mengarahkan ke halaman login: konten di baliknya tidak dianalisis."""
+    return bool(LOGIN_PATH.search(final_url))
+
+
+def has_login_form(page: ParsedPage, word_count: int) -> bool:
+    """Ada form kata sandi dan sedikit konten: kemungkinan sebagian konten butuh login."""
     has_password = page.soup.find("input", attrs={"type": "password"}) is not None
     return has_password and word_count < 150
 

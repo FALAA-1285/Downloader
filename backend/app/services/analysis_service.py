@@ -12,12 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.base import AnalysisContext
 from app.adapters.registry import AdapterRegistry
 from app.core.config import Settings
-from app.core.errors import AppError
+from app.core.errors import AppError, UnsafeURLError
 from app.core.http_client import build_client
 from app.core.url_guard import validate_url
 from app.extractors.text import word_count
-from app.models.models import Analysis, utcnow
-from app.schemas.api import AnalyzeResponse, MediaItem, PageInfo, SourceInfo, TextContent
+from app.models.models import Analysis, aware, utcnow
+from app.schemas.api import AnalysisJob, AnalyzeResponse, MediaItem, PageInfo, SourceInfo, TextContent
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,19 @@ class AnalysisService:
         self.settings = settings
         self.registry = registry
         self._semaphore = asyncio.Semaphore(settings.analyze_concurrency)
+
+    def _safe_preview(self, url: str | None) -> str | None:
+        """URL pratinjau dimuat langsung oleh browser pengguna, jadi harus lolos aturan SSRF yang sama.
+
+        Thumbnail dan poster dari halaman tak tepercaya bisa menunjuk ke perangkat LAN
+        (mis. `http://192.168.1.1/...`); URL seperti itu dibuang (M-02).
+        """
+        if not url:
+            return None
+        try:
+            return validate_url(url, self.settings.port_allowlist).url
+        except UnsafeURLError:
+            return None
 
     async def analyze(self, session: AsyncSession, raw_url: str, media_types: list[str]) -> AnalyzeResponse:
         target = validate_url(raw_url, self.settings.port_allowlist)
@@ -68,7 +81,7 @@ class AnalysisService:
                 final_url=outcome.final_url if outcome.final_url != target.url else None,
                 title=outcome.title,
                 description=outcome.description,
-                thumbnail=outcome.thumbnail,
+                thumbnail=self._safe_preview(outcome.thumbnail),
             ),
             media=[
                 MediaItem(
@@ -84,7 +97,7 @@ class AnalysisService:
                     height=c.height,
                     duration=c.duration,
                     language=c.language,
-                    preview_url=c.preview_url if c.downloadable or c.type != "image" else None,
+                    preview_url=self._safe_preview(c.preview_url) if c.downloadable or c.type != "image" else None,
                 )
                 for c in outcome.media
             ],
@@ -108,3 +121,28 @@ class AnalysisService:
         await session.commit()
         log.info("analysis %s: %s media from %s", analysis_id, len(result.media), target.domain)
         return result
+
+
+async def load_analysis(session: AsyncSession, analysis_id: uuid.UUID) -> Analysis:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None or aware(analysis.expires_at) < utcnow():
+        raise AppError("analysis_not_found", "Hasil analisis tidak ditemukan atau sudah kedaluwarsa.", 404)
+    return analysis
+
+
+def summarize(analysis: Analysis) -> AnalysisJob:
+    counts: dict[str, int] = {}
+    for item in analysis.result.get("media", []):
+        counts[item["type"]] = counts.get(item["type"], 0) + 1
+    if (analysis.result.get("text") or {}).get("content"):
+        counts["text"] = 1
+    return AnalysisJob(
+        id=analysis.id,
+        source_url=analysis.source_url,
+        source_domain=analysis.source_domain,
+        platform=analysis.platform,
+        title=analysis.title,
+        media_count=counts,
+        created_at=aware(analysis.created_at),
+        expires_at=aware(analysis.expires_at),
+    )

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import Select, or_, select
@@ -11,9 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.errors import AppError
-from app.core.url_guard import validate_url
+from app.core.url_guard import redact_url, validate_url
 from app.extractors.common import sanitize_filename
-from app.models.models import ACTIVE_STATUSES, Analysis, DownloadHistory, DownloadJob, aware, utcnow
+from app.models.models import Analysis, DownloadFile, DownloadHistory, DownloadJob, aware, utcnow
+
+# Status yang sedang dikerjakan worker. `pending` tidak termasuk: job antre boleh dihapus,
+# dan runner akan melewatinya karena klaim atomiknya gagal.
+RUNNING_STATUSES = ("processing", "downloading")
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +68,7 @@ async def create_jobs(
 
     await session.flush()
     for job in jobs:
-        session.add(DownloadHistory(job_id=job.id, action="created", details={"media_url": job.media_url}))
+        session.add(DownloadHistory(job_id=job.id, action="created", details={"media_url": redact_url(job.media_url)}))
     await session.commit()
     for job in jobs:
         await session.refresh(job, attribute_names=["file"])
@@ -106,11 +112,50 @@ async def retry_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
 
 
 def remove_file(settings: Settings, storage_key: str) -> None:
+    """Sinkron; panggil lewat `remove_file_async` dari kode async."""
     path = safe_storage_path(settings, storage_key)
     try:
         path.unlink(missing_ok=True)
     except OSError:
         log.warning("gagal menghapus file %s", storage_key, exc_info=True)
+
+
+async def remove_file_async(settings: Settings, storage_key: str) -> None:
+    await asyncio.to_thread(remove_file, settings, storage_key)
+
+
+async def mark_failed(session: AsyncSession, job_id: uuid.UUID, message: str) -> None:
+    job = await session.get(DownloadJob, job_id)
+    if job is None or job.status != "pending":
+        return
+    job.status = "failed"
+    job.error_message = message
+    job.completed_at = utcnow()
+    session.add(DownloadHistory(job_id=job.id, action="failed", details={"error": message}))
+    await session.commit()
+
+
+@dataclass
+class ServableFile:
+    path: Path
+    file: DownloadFile
+
+
+async def get_servable_file(session: AsyncSession, settings: Settings, job_id: uuid.UUID) -> ServableFile:
+    """File hasil yang boleh disajikan: job selesai, belum kedaluwarsa, dan ada di disk."""
+    job = await get_job(session, job_id)
+    file = job.file
+    if job.status != "completed" or file is None:
+        raise AppError("file_not_ready", "File belum tersedia untuk pekerjaan ini.", 409)
+    expires = aware(file.expires_at)
+    if file.deleted_at is not None or (expires is not None and expires < utcnow()):
+        raise AppError(
+            "file_expired", "File sudah kedaluwarsa dan dihapus dari server. Unduh ulang dari URL sumber.", 410
+        )
+    path = safe_storage_path(settings, file.storage_key)
+    if not await asyncio.to_thread(path.is_file):
+        raise AppError("file_missing", "File tidak ditemukan di penyimpanan server.", 410)
+    return ServableFile(path=path, file=file)
 
 
 def safe_storage_path(settings: Settings, storage_key: str) -> Path:
@@ -125,9 +170,9 @@ def safe_storage_path(settings: Settings, storage_key: str) -> Path:
 async def delete_job(session: AsyncSession, settings: Settings, job_id: uuid.UUID) -> None:
     """Menghapus riwayat beserta file sementaranya dan log kejadiannya."""
     job = await get_job(session, job_id)
-    if job.status in ACTIVE_STATUSES:
+    if job.status in RUNNING_STATUSES:
         raise AppError("job_active", "Pekerjaan masih berjalan. Tunggu hingga selesai sebelum menghapus.", 409)
     if job.file is not None:
-        remove_file(settings, job.file.storage_key)
+        await remove_file_async(settings, job.file.storage_key)
     await session.delete(job)
     await session.commit()

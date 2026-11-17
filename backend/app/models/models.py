@@ -26,7 +26,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 JSONType = JSON().with_variant(JSONB(), "postgresql")
 
 JOB_STATUSES = ("pending", "processing", "downloading", "completed", "failed")
-ACTIVE_STATUSES = ("pending", "processing", "downloading")
 MEDIA_TYPES = ("image", "video", "audio", "subtitle", "text")
 
 
@@ -94,7 +93,8 @@ class DownloadJob(Base):
     events: Mapped[list[DownloadHistory]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
-        lazy="noload",
+        # Tidak pernah dimuat otomatis; dihapus lewat ON DELETE CASCADE (passive_deletes).
+        lazy="raise",
         passive_deletes=True,
         order_by="DownloadHistory.created_at",
     )

@@ -7,10 +7,12 @@ x-backend: &backend
   build: ./backend
   env_file: .env
   environment:
-    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?isi POSTGRES_USER di .env}:${POSTGRES_PASSWORD:?isi POSTGRES_PASSWORD di .env}@postgres:5432/${POSTGRES_DB:?isi POSTGRES_DB di .env}
     REDIS_URL: redis://redis:6379/0
     QUEUE_BACKEND: rq
     STORAGE_PATH: /app/storage
+    # Browser di host masuk lewat gateway bridge Docker (172.16.0.0/12); port tetap hanya dibuka di 127.0.0.1.
+    ALLOWED_CLIENT_NETWORKS: 127.0.0.0/8,::1/128,172.16.0.0/12
   volumes:
     - storage:/app/storage
   depends_on:
@@ -24,9 +26,9 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?isi POSTGRES_USER di .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?isi POSTGRES_PASSWORD di .env}
+      POSTGRES_DB: ${POSTGRES_DB:?isi POSTGRES_DB di .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -47,20 +49,30 @@ services:
     <<: *backend
     ports:
       - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
 
   worker:
     <<: *backend
     command: ["rq", "worker", "downloads", "--url", "redis://redis:6379/0"]
+    depends_on:
+      backend:
+        condition: service_healthy  # migrasi database dijalankan oleh backend
 
   frontend:
     build:
-      context: ./frondend
+      context: ./frontend
       args:
         NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

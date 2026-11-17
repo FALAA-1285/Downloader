@@ -120,7 +120,9 @@ async def test_analyze_upstream_errors(client, web):
         return_value=httpx.Response(302, headers={"Location": "https://login.example/login?next=/private"})
     )
     web.get("https://login.example/login?next=/private").mock(
-        return_value=httpx.Response(200, headers={"Content-Type": "text/html"}, content=b"<form><input type=password></form>")
+        return_value=httpx.Response(
+            200, headers={"Content-Type": "text/html"}, content=b"<form><input type=password></form>"
+        )
     )
     web.get("https://slow.example/").mock(side_effect=httpx.ConnectTimeout("timeout"))
 

@@ -23,7 +23,14 @@ SRT = b"1\n00:00:01,000 --> 00:00:04,500\nHalo\n\n2\n00:00:05,000 --> 00:00:07,0
         (MP4, "mp4"),
         (b"\x00\x00\x00\x1cftypqt  ", "mov"),
         (b"\x1a\x45\xdf\xa3\x01\x00webm", "webm"),
-        (b"ID3\x04\x00", "mp3"),
+        (b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x64", "mp3"),
+        (b"\xff\xfb\x90\x64\x00", "mp3"),
+        # ID3 diikuti playlist HLS: bukan MP3, harus ditolak (M-01).
+        (b"ID3\x04\x00\x00\x00\x00\x00\x00#EXTM3U\n#EXTINF:1,\nfile:///etc/passwd\n", None),
+        (b"\x00\x00\x00\x18ftypheic", None),
+        (b"\x00\x00\x00\x18ftypisom", "mp4"),
+        (b"<?xml version='1.0'?>\n<!-- c --><svg xmlns='http://www.w3.org/2000/svg'/>", "svg"),
+        (b"<div><svg></svg></div>", None),
         (b"OggS\x00", "ogg"),
         (VTT, "vtt"),
         (SRT, "srt"),
@@ -62,7 +69,9 @@ def test_vtt_parsing_and_conversion():
     assert len(cues) == 2
     assert cues[0].start == 1.0 and cues[0].text == "Halo <b>semua</b>"
     srt = vtt_to_srt(VTT).decode()
-    assert srt.startswith("1\n00:00:01,000 --> 00:00:04,500\nHalo <b>semua</b>\n\n2\n00:00:05,000 --> 00:00:07,250\nBaris & dua")
+    assert srt.startswith(
+        "1\n00:00:01,000 --> 00:00:04,500\nHalo <b>semua</b>\n\n2\n00:00:05,000 --> 00:00:07,250\nBaris & dua"
+    )
 
 
 def test_invalid_subtitle_rejected():

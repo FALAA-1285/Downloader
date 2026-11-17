@@ -166,7 +166,6 @@ def extract_subtitles(soup: BeautifulSoup, base: str) -> list[Candidate]:
             mime_type=mime_from_ext(ext) or "text/vtt",
             language=(label or LANG_NAMES.get(lang_code or "", lang) or None),
             label=label,
-            extra={"lang": lang},
         )
 
     for track in soup.find_all("track", src=True):

@@ -1,10 +1,11 @@
 """Eksekusi satu pekerjaan unduhan (PRD §7.2, NFR-02, NFR-03).
 
 Dipakai oleh antrean inline (proses API) maupun worker RQ.
-- Streaming ke file sementara; tidak memuat seluruh file ke memori.
-- Batas ukuran per file, batas total storage, dan batas waktu total.
+- Job diklaim secara atomik (`pending` → `processing`), sehingga tidak diproses dua kali.
+- Streaming ke file sementara; tulis disk dilakukan di thread agar event loop tidak terblokir.
+- Batas ukuran per file (lebih kecil untuk subtitle), batas total storage, dan batas waktu total.
 - Retry terbatas untuk error sementara.
-- Isi divalidasi dengan magic bytes; nama file dibuat server.
+- Isi divalidasi dengan magic bytes; video/audio dicek ffprobe dengan whitelist protokol & format.
 - File sementara selalu dibersihkan bila gagal.
 """
 
@@ -20,14 +21,13 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 
-import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.core.config import Settings
 from app.core.errors import AppError, TransientError
-from app.core.http_client import build_client, map_http_error, open_stream, status_error
-from app.core.url_guard import validate_url
-from app.downloaders.file_validator import resolve_kind
+from app.core.http_client import build_client, is_encoded, iter_body, open_stream, status_error
+from app.core.url_guard import redact_url, validate_url
+from app.downloaders.file_validator import Kind, resolve_kind
 from app.downloaders.subtitles import validate_subtitle, vtt_to_srt
 from app.extractors.common import sanitize_filename
 from app.models.db import SessionFactory
@@ -36,19 +36,39 @@ from app.models.models import DownloadFile, DownloadHistory, DownloadJob, utcnow
 log = logging.getLogger(__name__)
 
 CHUNK = 64 * 1024
+WRITE_BUFFER = 1024 * 1024
 PROGRESS_INTERVAL = 0.5
 SNIFF_BYTES = 4096
+FFPROBE_TIMEOUT = 30
 UNEXPECTED = "Terjadi kesalahan tak terduga saat mengunduh. Coba lagi."
+
+# Demuxer FFmpeg yang boleh dipakai untuk setiap jenis hasil deteksi magic bytes. Tanpa
+# whitelist ini, ffprobe bisa mengenali konten lain (mis. playlist HLS) dan membuka sumber lain.
+FFPROBE_FORMATS = {
+    "mp4": "mov,mp4,m4a,3gp,3g2,mj2",
+    "mov": "mov,mp4,m4a,3gp,3g2,mj2",
+    "m4a": "mov,mp4,m4a,3gp,3g2,mj2",
+    "webm": "matroska,webm",
+    "mkv": "matroska,webm",
+    "ogg": "ogg",
+    "mp3": "mp3",
+    "aac": "aac",
+    "wav": "wav",
+    "flac": "flac",
+}
 
 
 async def run_download(job_id: uuid.UUID, sessions: SessionFactory, settings: Settings) -> None:
+    now = utcnow()
     async with sessions() as s:
-        job = await s.get(DownloadJob, job_id)
-        if job is None or job.status != "pending":
-            return
-        job.status = "processing"
-        job.started_at = utcnow()
-        job.error_message = None
+        claimed = await s.execute(
+            update(DownloadJob)
+            .where(DownloadJob.id == job_id, DownloadJob.status == "pending")
+            .values(status="processing", started_at=now, error_message=None, updated_at=now)
+        )
+        if claimed.rowcount != 1:
+            await s.rollback()
+            return  # sudah diambil proses lain, dihapus, atau bukan pending
         s.add(DownloadHistory(job_id=job_id, action="started"))
         await s.commit()
 
@@ -90,14 +110,14 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
         display_name, options = job.filename, job.options or {}
 
     validate_url(media_url, settings.port_allowlist)
-    await _check_storage_capacity(sessions, settings, incoming=None)
+    await _check_storage_capacity(sessions, settings, incoming=None, exclude=None)
 
-    settings.temp_dir.mkdir(parents=True, exist_ok=True)
-    settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(settings.temp_dir.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread(settings.downloads_dir.mkdir, parents=True, exist_ok=True)
     tmp_path = settings.temp_dir / f"{job_id.hex}.part"
     try:
         async with asyncio.timeout(settings.download_timeout_seconds):
-            head, size = await _stream_to_file(job_id, media_url, tmp_path, sessions, settings)
+            head, size = await _stream_to_file(job_id, media_url, media_type, tmp_path, sessions, settings)
         await _finalize(job_id, tmp_path, head, size, media_type, display_name, options, sessions, settings)
     except TimeoutError as exc:
         raise TransientError(
@@ -106,13 +126,19 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
     except OSError as exc:
         raise _storage_error(exc) from exc
     finally:
-        tmp_path.unlink(missing_ok=True)
+        await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
+
+
+def _size_limit(media_type: str, settings: Settings) -> tuple[int, str]:
+    if media_type == "subtitle":
+        return min(settings.max_subtitle_bytes, settings.max_download_bytes), f"{settings.max_subtitle_size_mb} MB"
+    return settings.max_download_bytes, f"{settings.max_download_size_mb} MB"
 
 
 async def _stream_to_file(
-    job_id: uuid.UUID, url: str, tmp_path: Path, sessions: SessionFactory, settings: Settings
+    job_id: uuid.UUID, url: str, media_type: str, tmp_path: Path, sessions: SessionFactory, settings: Settings
 ) -> tuple[bytes, int]:
-    max_bytes = settings.max_download_bytes
+    max_bytes, limit_label = _size_limit(media_type, settings)
     async with (
         build_client(settings) as client,
         open_stream(client, url, settings, headers={"Accept-Encoding": "identity"}) as (resp, _final),
@@ -120,41 +146,41 @@ async def _stream_to_file(
         if resp.status_code >= 400:
             raise status_error(resp.status_code, subject="File")
         length = resp.headers.get("content-length")
-        encoded = resp.headers.get("content-encoding", "identity").lower() not in ("", "identity")
         # Content-Length dari respons terkompresi bukan ukuran file sebenarnya.
-        total = int(length) if length and length.isdigit() and not encoded else None
+        total = int(length) if length and length.isdigit() and not is_encoded(resp) else None
         if total is not None and total > max_bytes:
             raise AppError(
                 "file_too_large",
-                f"Ukuran file ({total / 1_048_576:.1f} MB) melebihi batas {settings.max_download_size_mb} MB.",
+                f"Ukuran file ({total / 1_048_576:.1f} MB) melebihi batas {limit_label}.",
                 413,
             )
-        await _check_storage_capacity(sessions, settings, incoming=total)
+        await _check_storage_capacity(sessions, settings, incoming=total, exclude=tmp_path)
         await _update(sessions, job_id, status="downloading", size_total=total, size_downloaded=0)
 
         written = 0
         head = b""
+        buffer = bytearray()
         last_report = time.monotonic()
-        with tmp_path.open("wb") as fh:
-            try:
-                async for chunk in resp.aiter_bytes(CHUNK):
-                    written += len(chunk)
-                    if written > max_bytes:
-                        raise AppError(
-                            "file_too_large",
-                            f"Unduhan dihentikan: file melebihi batas {settings.max_download_size_mb} MB.",
-                            413,
-                        )
-                    if len(head) < SNIFF_BYTES:
-                        head += chunk[: SNIFF_BYTES - len(head)]
-                    fh.write(chunk)
-                    if time.monotonic() - last_report >= PROGRESS_INTERVAL:
-                        last_report = time.monotonic()
-                        await _update(sessions, job_id, size_downloaded=written)
-            except AppError:
-                raise
-            except httpx.HTTPError as exc:  # error jaringan di tengah stream
-                raise map_http_error(exc, url) from exc
+        fh = await asyncio.to_thread(tmp_path.open, "wb")
+        try:
+            async for chunk in iter_body(resp, CHUNK):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise AppError("file_too_large", f"Unduhan dihentikan: file melebihi batas {limit_label}.", 413)
+                if len(head) < SNIFF_BYTES:
+                    head += chunk[: SNIFF_BYTES - len(head)]
+                buffer += chunk
+                if len(buffer) >= WRITE_BUFFER:
+                    await asyncio.to_thread(fh.write, bytes(buffer))
+                    buffer.clear()
+                if time.monotonic() - last_report >= PROGRESS_INTERVAL:
+                    last_report = time.monotonic()
+                    await _update(sessions, job_id, size_downloaded=written)
+            if buffer:
+                await asyncio.to_thread(fh.write, bytes(buffer))
+        finally:
+            await asyncio.to_thread(fh.close)
+
         if written == 0:
             raise AppError("empty_file", "Sumber mengirim file kosong.", 422)
         if total is not None and written < total:
@@ -178,25 +204,25 @@ async def _finalize(
     mime, ext = kind.mime, kind.ext
 
     if media_type == "subtitle":
-        data = await asyncio.to_thread(tmp_path.read_bytes)
+        data = await asyncio.to_thread(tmp_path.read_bytes)  # sudah dibatasi max_subtitle_size_mb
         validate_subtitle(data, kind.name)
         if options.get("subtitle_format") == "srt" and kind.name == "vtt":
             converted = vtt_to_srt(data)
             await asyncio.to_thread(tmp_path.write_bytes, converted)
             mime, ext, size = "application/x-subrip", "srt", len(converted)
     elif media_type in ("video", "audio"):
-        await _ffprobe_check(tmp_path, settings)
+        await _ffprobe_check(tmp_path, kind, settings)
 
     storage_key = f"{job_id.hex}.{ext}"
     final_path = settings.downloads_dir / storage_key
-    os.replace(tmp_path, final_path)
+    await asyncio.to_thread(os.replace, tmp_path, final_path)
 
     stem = sanitize_filename(Path(display_name).stem or media_type, fallback=media_type)
     now = utcnow()
     async with sessions() as s:
         job = await s.get(DownloadJob, job_id)
         if job is None:  # dihapus saat berjalan
-            final_path.unlink(missing_ok=True)
+            await asyncio.to_thread(final_path.unlink, missing_ok=True)
             return
         if job.file is not None:
             await s.delete(job.file)
@@ -217,20 +243,31 @@ async def _finalize(
         job.size_downloaded = size
         job.size_total = size
         job.error_message = None
+        # URL tidak lagi dibutuhkan setelah selesai; buang query string yang bisa berisi token (PRD §11).
+        job.media_url = redact_url(job.media_url)
         s.add(DownloadHistory(job_id=job_id, action="completed", details={"size": size, "mime": mime}))
         await s.commit()
     log.info("download %s selesai (%s bytes)", job_id, size)
 
 
-async def _ffprobe_check(path: Path, settings: Settings) -> None:
-    """Validasi kontainer media dengan ffprobe bila tersedia. File tidak pernah dieksekusi."""
+async def _ffprobe_check(path: Path, kind: Kind, settings: Settings) -> None:
+    """Validasi kontainer media dengan ffprobe bila tersedia. File tidak pernah dieksekusi.
+
+    `-protocol_whitelist file` mencegah ffprobe membuka URL/protokol lain yang dirujuk isi file,
+    dan `-format_whitelist` memaksa demuxer sesuai hasil deteksi magic bytes.
+    """
     binary = shutil.which(settings.ffprobe_path)
-    if not binary:
+    formats = FFPROBE_FORMATS.get(kind.name)
+    if not binary or not formats:
         return
     proc = await asyncio.create_subprocess_exec(
         binary,
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
+        "-format_whitelist",
+        formats,
         "-show_entries",
         "format=format_name",
         "-of",
@@ -240,21 +277,40 @@ async def _ffprobe_check(path: Path, settings: Settings) -> None:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        _out, _err = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except TimeoutError:
+        await asyncio.wait_for(proc.communicate(), timeout=FFPROBE_TIMEOUT)
+    except TimeoutError as exc:
         proc.kill()
         await proc.wait()
-        return  # ffprobe lambat bukan alasan menolak file
+        raise AppError(
+            "invalid_media", "Pemeriksaan file media melewati batas waktu. File tidak disimpan.", 422
+        ) from exc
     if proc.returncode != 0:
         raise AppError("invalid_media", "File media rusak atau tidak dapat dibaca. File tidak disimpan.", 422)
 
 
-async def _check_storage_capacity(sessions: SessionFactory, settings: Settings, incoming: int | None) -> None:
+def _temp_usage(folder: Path, exclude: Path | None) -> int:
+    if not folder.exists():
+        return 0
+    total = 0
+    for path in folder.iterdir():
+        if path.is_file() and path != exclude:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+async def _check_storage_capacity(
+    sessions: SessionFactory, settings: Settings, incoming: int | None, exclude: Path | None
+) -> None:
+    """Kuota mencakup file selesai di database dan unduhan lain yang sedang berjalan di temp/."""
     async with sessions() as s:
         used = await s.scalar(
             select(func.coalesce(func.sum(DownloadFile.file_size), 0)).where(DownloadFile.deleted_at.is_(None))
         )
-    if int(used or 0) + (incoming or 0) > settings.max_storage_bytes:
+    in_progress = await asyncio.to_thread(_temp_usage, settings.temp_dir, exclude)
+    if int(used or 0) + in_progress + (incoming or 0) > settings.max_storage_bytes:
         raise AppError(
             "storage_quota",
             "Kapasitas penyimpanan sementara sudah penuh. Hapus riwayat lama atau tunggu file kedaluwarsa dibersihkan.",

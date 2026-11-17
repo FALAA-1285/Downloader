@@ -65,7 +65,9 @@ async def app(settings: Settings):
 @pytest.fixture
 async def client(app) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver", headers={"X-UMD-Client": "test"}
+    ) as c:
         yield c
 
 

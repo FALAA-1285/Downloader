@@ -12,13 +12,19 @@ storage/downloads/*
 storage/temp/*
 !storage/**/.gitkeep
 
+# Cache lokal
+.cache/
+
 # Python
 backend/.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.coverage
+*.coverage
+htmlcov/
 
 # Node
-frondend/node_modules/
-frondend/.next/
+frontend/node_modules/
+frontend/.next/

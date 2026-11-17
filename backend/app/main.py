@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import ipaddress
 import logging
 from collections.abc import AsyncIterator
@@ -27,12 +28,21 @@ from app.workers.queue import make_queue
 
 log = logging.getLogger("app")
 
+# Header wajib untuk request yang mengubah data. Header kustom memaksa preflight CORS,
+# sehingga situs lain tidak bisa memicu POST/DELETE ke API lokal lewat "simple request".
+CLIENT_HEADER = "X-UMD-Client"
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+PUBLIC_PATHS = {"/api/v1/health"}
+
 FIELD_LABELS = {"url": "URL", "media_types": "jenis media", "media_ids": "pilihan media", "analysis_id": "ID analisis"}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Logger httpx/httpcore mencatat URL lengkap (termasuk query yang bisa berisi token).
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -74,12 +84,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     # Urutan: middleware yang ditambahkan terakhir dijalankan pertama.
+    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_body_kb * 1024)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization", CLIENT_HEADER],
         max_age=600,
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
@@ -96,6 +107,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ip = None
         if ip is not None and not any(ip in net for net in networks):
             return _error(403, "client_forbidden", "Akses dari jaringan ini tidak diizinkan.")
+        path = request.url.path
+        if path.startswith("/api/") and request.method != "OPTIONS":
+            if settings.api_token and path not in PUBLIC_PATHS:
+                supplied = request.headers.get("authorization", "")
+                if not hmac.compare_digest(supplied.encode(), f"Bearer {settings.api_token}".encode()):
+                    return _error(401, "unauthorized", "Token API tidak valid atau tidak dikirim.")
+            if request.method in MUTATING_METHODS and not request.headers.get(CLIENT_HEADER):
+                return _error(403, "client_header_missing", f"Header {CLIENT_HEADER} wajib untuk permintaan ini.")
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -124,6 +143,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.include_router(router, prefix="/api/v1")
 
     return app
+
+
+class BodyLimitMiddleware:
+    """Menolak body request yang lebih besar dari batas (NFR-01), termasuk body chunked."""
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        length = dict(scope.get("headers") or []).get(b"content-length")
+        if length is not None and length.isdigit() and int(length) > self.max_bytes:
+            await _error(413, "body_too_large", "Ukuran permintaan terlalu besar.")(scope, receive, send)
+            return
+
+        received = 0
+        rejected = False
+
+        async def limited_receive():
+            nonlocal received, rejected
+            message = await receive()
+            if message["type"] == "http.request" and not rejected:
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    # Kirim 413 sekarang, lalu putuskan body untuk aplikasi; respons aplikasi dibuang.
+                    rejected = True
+                    await _error(413, "body_too_large", "Ukuran permintaan terlalu besar.")(scope, receive, send)
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message):
+            if not rejected:
+                await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
 
 
 def _error(status: int, code: str, message: str, headers: dict[str, str] | None = None) -> JSONResponse:

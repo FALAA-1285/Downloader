@@ -11,15 +11,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_VERSION = "0.1.0"
 
+# Folder backend/ (app/core/config.py → parents[2]). Semua path relatif diselesaikan dari sini,
+# bukan dari direktori kerja saat proses dijalankan.
+BASE_DIR = Path(__file__).resolve().parents[2]
+PROJECT_DIR = BASE_DIR.parent
+
 
 def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(PROJECT_DIR / ".env", BASE_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     app_env: Literal["development", "production", "test"] = "development"
+    # Dipakai oleh `python -m app` (lihat app/__main__.py).
     app_host: str = "127.0.0.1"
     app_port: int = 8000
 
@@ -29,8 +37,10 @@ class Settings(BaseSettings):
     # rq: unduhan dikirim ke Redis dan diproses oleh worker RQ terpisah.
     queue_backend: Literal["inline", "rq"] = "inline"
 
+    # Relatif terhadap folder backend/ jika bukan path absolut.
     storage_path: Path = Path("../storage")
     max_download_size_mb: int = 200
+    max_subtitle_size_mb: int = 5
     max_storage_mb: int = 2048
     download_timeout_seconds: int = 120
     download_max_retries: int = 2
@@ -38,6 +48,8 @@ class Settings(BaseSettings):
     file_retention_hours: int = 24
     analysis_retention_hours: int = 24
     cleanup_interval_seconds: int = 600
+    # Job `pending` yang tidak diambil worker selama ini dianggap hilang dari antrean.
+    stale_pending_seconds: int = 3600
 
     analyze_timeout_seconds: float = 25.0
     analyze_concurrency: int = 4
@@ -54,7 +66,11 @@ class Settings(BaseSettings):
 
     frontend_origin: str = "http://localhost:3000,http://127.0.0.1:3000"
     allowed_hosts: str = "localhost,127.0.0.1,backend"
-    allowed_client_networks: str = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    # Default hanya loopback. Perluas secara eksplisit (mis. jaringan bridge Docker) lewat env.
+    allowed_client_networks: str = "127.0.0.0/8,::1/128"
+    # Jika diisi, semua request API wajib membawa header `Authorization: Bearer <token>`.
+    api_token: str | None = None
+    max_request_body_kb: int = 64
     rate_limit_analyze_per_minute: int = 20
     rate_limit_downloads_per_minute: int = 30
 
@@ -95,8 +111,13 @@ class Settings(BaseSettings):
         return int(self.max_page_size_mb * 1024 * 1024)
 
     @property
+    def max_subtitle_bytes(self) -> int:
+        return self.max_subtitle_size_mb * 1024 * 1024
+
+    @property
     def storage_root(self) -> Path:
-        return self.storage_path.resolve()
+        path = self.storage_path if self.storage_path.is_absolute() else BASE_DIR / self.storage_path
+        return path.resolve()
 
     @property
     def downloads_dir(self) -> Path:

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 MediaType = Literal["image", "video", "audio", "subtitle", "text"]
 JobStatus = Literal["pending", "processing", "downloading", "completed", "failed"]
@@ -81,7 +81,7 @@ class AnalysisJob(BaseModel):
 
 class CreateDownloadsRequest(BaseModel):
     analysis_id: uuid.UUID
-    media_ids: list[str] = Field(min_length=1, max_length=50)
+    media_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(min_length=1, max_length=50)
     subtitle_format: Literal["original", "srt"] = "original"
 
 
