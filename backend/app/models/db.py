@@ -11,12 +11,17 @@ SessionFactory = async_sessionmaker[AsyncSession]
 def make_engine(settings: Settings) -> AsyncEngine:
     url = settings.database_url
     if url.startswith("sqlite"):
-        engine = create_async_engine(url, connect_args={"check_same_thread": False})
+        engine = create_async_engine(
+            url,
+            connect_args={"check_same_thread": False, "timeout": 30.0},
+        )
 
         @event.listens_for(engine.sync_engine, "connect")
         def _fk_on(dbapi_conn, _record):  # pragma: no cover - sqlite only
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
             cur.close()
 
         return engine

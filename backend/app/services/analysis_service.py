@@ -98,6 +98,7 @@ class AnalysisService:
                     duration=c.duration,
                     language=c.language,
                     preview_url=self._safe_preview(c.preview_url) if c.downloadable or c.type != "image" else None,
+                    options=c.options,
                 )
                 for c in outcome.media
             ],

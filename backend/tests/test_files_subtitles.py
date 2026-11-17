@@ -29,6 +29,7 @@ SRT = b"1\n00:00:01,000 --> 00:00:04,500\nHalo\n\n2\n00:00:05,000 --> 00:00:07,0
         (b"ID3\x04\x00\x00\x00\x00\x00\x00#EXTM3U\n#EXTINF:1,\nfile:///etc/passwd\n", None),
         (b"\x00\x00\x00\x18ftypheic", None),
         (b"\x00\x00\x00\x18ftypisom", "mp4"),
+        (b"\x00\x00\x00\x1cftypFACE\x00\x00\x00\x00isom", "mp4"),
         (b"<?xml version='1.0'?>\n<!-- c --><svg xmlns='http://www.w3.org/2000/svg'/>", "svg"),
         (b"<div><svg></svg></div>", None),
         (b"OggS\x00", "ogg"),

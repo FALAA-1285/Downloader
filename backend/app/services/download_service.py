@@ -49,7 +49,10 @@ async def create_jobs(
             )
         # Validasi ulang sumber sebelum membuat pekerjaan (PRD §7.2 langkah 3).
         validate_url(item["url"], settings.port_allowlist)
-        options = {"subtitle_format": subtitle_format} if item["type"] == "subtitle" else None
+        options = dict(item.get("options") or {})
+        if item["type"] == "subtitle":
+            options["subtitle_format"] = subtitle_format
+        job_options = options or None
         job = DownloadJob(
             analysis_id=analysis.id,
             media_id=media_id,
@@ -60,7 +63,7 @@ async def create_jobs(
             media_type=item["type"],
             filename=sanitize_filename(item.get("filename") or item["type"], fallback=item["type"]),
             size_total=item.get("size"),
-            options=options,
+            options=job_options,
             status="pending",
         )
         session.add(job)

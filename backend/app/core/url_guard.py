@@ -12,12 +12,19 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import socket
+import time
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import httpx
+
 from .errors import AppError, UnsafeURLError
+
+log = logging.getLogger(__name__)
 
 MAX_URL_LENGTH = 2048
 DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -27,6 +34,52 @@ BLOCKED_SUFFIXES = (".localhost", ".local", ".internal", ".intranet", ".lan", ".
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 BLOCKED_MESSAGE = "Alamat lokal atau jaringan internal diblokir demi keamanan."
+
+# Jaringan IP pemblokir ISP di Indonesia (Laman Labuh / Internet Positif / UZone)
+_ISP_BLOCK_NETWORKS = (
+    ipaddress.ip_network("103.151.222.0/23"),  # Laman Labuh ISPku / Telkom
+    ipaddress.ip_network("118.98.0.0/16"),  # Internet Positif Telkom
+    ipaddress.ip_network("36.86.63.0/24"),  # Telkomsel UZone
+    ipaddress.ip_network("180.250.0.0/16"),  # Telkom TrustPositif
+)
+
+_DOH_CACHE: dict[str, tuple[float, list[str]]] = {}
+_DOH_CACHE_TTL = 300.0
+
+
+def _is_isp_blocked_ip(ip: IPAddress) -> bool:
+    return any(ip in net for net in _ISP_BLOCK_NETWORKS)
+
+
+async def resolve_doh(host: str) -> list[str]:
+    """Resolusi DNS via DNS-over-HTTPS (DoH) untuk melewati pembajakan DNS ISP."""
+    now = time.monotonic()
+    if host in _DOH_CACHE:
+        cached_time, cached_ips = _DOH_CACHE[host]
+        if now - cached_time < _DOH_CACHE_TTL:
+            return cached_ips
+
+    url = f"https://dns.adguard-dns.com/resolve?name={host}"
+    addresses: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                for ans in data.get("Answer", []):
+                    if ans.get("type") == 1:
+                        try:
+                            ip = ipaddress.ip_address(ans.get("data"))
+                            if is_public_ip(ip) and ip.compressed not in addresses:
+                                addresses.append(ip.compressed)
+                        except ValueError:
+                            continue
+    except Exception as exc:
+        log.debug("DoH query gagal untuk %s: %s", host, exc)
+
+    if addresses:
+        _DOH_CACHE[host] = (now, addresses)
+    return addresses
 
 
 @dataclass(frozen=True)
@@ -140,20 +193,37 @@ async def resolve_public(host: str, port: int) -> list[str]:
         return [literal.compressed]
 
     loop = asyncio.get_running_loop()
+    infos: list[Any] = []
+    has_gaierror = False
     try:
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise AppError("dns_failed", f"Domain {host} tidak dapat ditemukan.", 422) from exc
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
+            timeout=2.0,
+        )
+    except (socket.gaierror, TimeoutError):
+        has_gaierror = True
 
     addresses: list[str] = []
-    for _family, _type, _proto, _canon, sockaddr in infos:
-        ip = ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0])
-        if not is_public_ip(ip):
-            raise UnsafeURLError(BLOCKED_MESSAGE)
-        if ip.compressed not in addresses:
-            addresses.append(ip.compressed)
+    has_isp_block = False
+    if not has_gaierror:
+        for _family, _type, _proto, _canon, sockaddr in infos:
+            ip = ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0])
+            if not is_public_ip(ip):
+                raise UnsafeURLError(BLOCKED_MESSAGE)
+            if _is_isp_blocked_ip(ip):
+                has_isp_block = True
+                break
+            if ip.compressed not in addresses:
+                addresses.append(ip.compressed)
+
+    # Jika DNS dibajak oleh ISP atau gagal me-resolve karena blokir ISP, gunakan DoH
+    if has_isp_block or has_gaierror or not addresses:
+        doh_addresses = await resolve_doh(host)
+        if doh_addresses:
+            return doh_addresses
+
     if not addresses:
-        raise AppError("dns_failed", f"Domain {host} tidak memiliki alamat.", 422)
+        raise AppError("dns_failed", f"Domain {host} tidak dapat ditemukan.", 422)
     return addresses
 
 

@@ -5,7 +5,8 @@ import type { AdapterInfo, AnalyzeResult, MediaItem, MediaType, ServerConfig, So
 
 const PLATFORMS: Array<{ type: SourceType; name: string; match: RegExp }> = [
   { type: "youtube", name: "YouTube", match: /(^|\.)(youtube\.com|youtu\.be)$/ },
-  { type: "instagram", name: "Instagram", match: /(^|\.)instagram\.com$/ },
+  { type: "instagram", name: "Instagram", match: /(^|\.)(instagram\.com|instagr\.am)$/ },
+  { type: "facebook", name: "Facebook", match: /(^|\.)(facebook\.com|fb\.watch|fb\.com)$/ },
   { type: "tiktok", name: "TikTok", match: /(^|\.)tiktok\.com$/ },
   { type: "x", name: "X (Twitter)", match: /(^|\.)(x\.com|twitter\.com)$/ },
 ];
@@ -191,11 +192,12 @@ export function mockAnalyze(url: string, types: MediaType[]): AnalyzeResult {
 
 export const MOCK_ADAPTERS: AdapterInfo[] = [
   { id: "generic", name: "Website umum", domains: ["*"], status: "active", note: "Analisis HTML: gambar, teks, video langsung, subtitle." },
-  { id: "youtube", name: "YouTube", domains: ["youtube.com", "youtu.be"], status: "evaluating", note: "Menunggu metode integrasi resmi yang berizin." },
-  { id: "instagram", name: "Instagram", domains: ["instagram.com"], status: "evaluating", note: "Konten privat dan konten di balik login tidak diakses." },
-  { id: "tiktok", name: "TikTok", domains: ["tiktok.com"], status: "evaluating", note: "Bergantung pada API dan izin yang tersedia." },
-  { id: "x", name: "X (Twitter)", domains: ["x.com", "twitter.com"], status: "evaluating", note: "Bergantung pada API dan izin yang tersedia." },
-  { id: "streaming", name: "Situs streaming film", domains: ["—"], status: "disabled", note: "Hanya subtitle atau file yang eksplisit dapat diunduh. Tanpa bypass DRM." },
+  { id: "youtube", name: "YouTube", domains: ["youtube.com", "youtu.be"], status: "active", note: "Unduhan video dan audio YouTube didukung via yt-dlp." },
+  { id: "instagram", name: "Instagram", domains: ["instagram.com"], status: "active", note: "Unduhan Reels dan Postingan Instagram didukung via yt-dlp." },
+  { id: "facebook", name: "Facebook", domains: ["facebook.com", "fb.watch"], status: "active", note: "Unduhan Video dan Reels Facebook didukung via yt-dlp." },
+  { id: "tiktok", name: "TikTok", domains: ["tiktok.com"], status: "active", note: "Unduhan Video TikTok didukung via yt-dlp." },
+  { id: "x", name: "X (Twitter)", domains: ["x.com", "twitter.com"], status: "active", note: "Unduhan Video X/Twitter didukung via yt-dlp." },
+  { id: "social_other", name: "Media Sosial Lainnya", domains: ["threads.net", "reddit.com", "pinterest.com", "vimeo.com"], status: "active", note: "Unduhan media sosial lainnya didukung via yt-dlp." },
 ];
 
 export const MOCK_CONFIG: ServerConfig = {

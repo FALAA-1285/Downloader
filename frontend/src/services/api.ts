@@ -18,7 +18,7 @@ const BASE = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "";
 const TOKEN = process.env.NEXT_PUBLIC_API_TOKEN ?? "";
 export const IS_DEMO = BASE === "";
 const API = `${BASE}/api/v1`;
-const ANALYZE_TIMEOUT_MS = 30_000;
+const ANALYZE_TIMEOUT_MS = 60_000;
 
 /** Header untuk setiap request: penanda klien (wajib untuk POST/DELETE) dan token bila ada. */
 function authHeaders(): Record<string, string> {
@@ -78,11 +78,30 @@ export async function analyzeUrl(url: string, mediaTypes: MediaType[]): Promise<
   );
 }
 
-export function createDownloads(analysisId: string, mediaIds: string[], subtitleFormat: SubtitleFormat = "original") {
-  return request<DownloadJob[]>("/downloads", {
-    method: "POST",
-    body: JSON.stringify({ analysis_id: analysisId, media_ids: mediaIds, subtitle_format: subtitleFormat }),
-  });
+export async function createDownloads(
+  analysisId: string,
+  mediaIds: string[],
+  subtitleFormat: SubtitleFormat = "original",
+): Promise<DownloadJob[]> {
+  if (mediaIds.length <= 250) {
+    return request<DownloadJob[]>("/downloads", {
+      method: "POST",
+      body: JSON.stringify({ analysis_id: analysisId, media_ids: mediaIds, subtitle_format: subtitleFormat }),
+    });
+  }
+  const chunks: string[][] = [];
+  for (let i = 0; i < mediaIds.length; i += 250) {
+    chunks.push(mediaIds.slice(i, i + 250));
+  }
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      request<DownloadJob[]>("/downloads", {
+        method: "POST",
+        body: JSON.stringify({ analysis_id: analysisId, media_ids: chunk, subtitle_format: subtitleFormat }),
+      }),
+    ),
+  );
+  return results.flat();
 }
 
 export function retryDownload(jobId: string) {

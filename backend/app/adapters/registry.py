@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from .base import Adapter
 from .generic import GenericAdapter
-from .platforms.placeholders import PLATFORM_ADAPTERS
+from .platforms.social import SOCIAL_ADAPTERS
 
 
 class AdapterRegistry:
     def __init__(self, disabled: set[str] | None = None) -> None:
         self.disabled = disabled or set()
         self.generic = GenericAdapter()
-        self.platforms: list[Adapter] = [cls() for cls in PLATFORM_ADAPTERS]
+        self.platforms: list[Adapter] = [cls() for cls in SOCIAL_ADAPTERS]
 
     def resolve(self, domain: str) -> Adapter:
         """Adapter khusus yang cocok dengan domain, atau Generic Adapter.

@@ -6,6 +6,7 @@ import hashlib
 import posixpath
 import re
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 IMAGE_EXT = {"jpg", "jpeg", "png", "gif", "webp", "svg", "avif"}
@@ -69,6 +70,7 @@ class Candidate:
     label: str | None = None
     preview_url: str | None = None
     probe: bool = True
+    options: dict[str, Any] | None = None
 
     @property
     def id(self) -> str:

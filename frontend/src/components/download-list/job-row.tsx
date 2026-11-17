@@ -75,7 +75,9 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
                     ? sizeLabel
                     : job.status === "pending"
                       ? "Dalam antrean"
-                      : "Memvalidasi sumber…"}
+                      : job.size_downloaded > 0
+                        ? "Menggabungkan media…"
+                        : "Menyiapkan unduhan…"}
                 </span>
                 {job.status === "downloading" && job.progress != null && <span>{job.progress}%</span>}
               </p>

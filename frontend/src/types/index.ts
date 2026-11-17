@@ -15,8 +15,11 @@ export type SourceType =
   | "generic"
   | "youtube"
   | "instagram"
+  | "facebook"
   | "tiktok"
-  | "x";
+  | "x"
+  | "social_other"
+  | string;
 
 export interface MediaItem {
   id: string;

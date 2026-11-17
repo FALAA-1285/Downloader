@@ -35,17 +35,71 @@ let loaded = false;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let syncError: string | null = null;
 const listeners = new Set<() => void>();
+const autoSaveIds = new Set<string>();
+const downloadQueue: StoredJob[] = [];
+let isDrainingQueue = false;
 
 /** Pekerjaan yang hanya ada di browser (mis. ekspor TXT), bukan di server. */
 const isLocal = (j: { id: string }) => j.id.startsWith("job-");
 const isActive = (j: DownloadJob) => j.status === "pending" || j.status === "processing" || j.status === "downloading";
+
+export function triggerBrowserDownload(j: StoredJob) {
+  if (typeof window === "undefined") return;
+  const href = jobFileHref(j);
+  if (href) {
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = j.filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(a);
+      } catch {
+        // abaikan
+      }
+    }, 150);
+  } else if (canFetchFile(j)) {
+    void saveJobFile(j);
+  }
+}
+
+function enqueueBrowserDownload(j: StoredJob) {
+  downloadQueue.push(j);
+  if (!isDrainingQueue) {
+    void drainDownloadQueue();
+  }
+}
+
+async function drainDownloadQueue() {
+  if (isDrainingQueue) return;
+  isDrainingQueue = true;
+  try {
+    while (downloadQueue.length > 0) {
+      const j = downloadQueue.shift();
+      if (j) {
+        triggerBrowserDownload(j);
+        // Beri jeda 350ms antar unduhan agar browser tidak mencegat multi-download
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+    }
+  } finally {
+    isDrainingQueue = false;
+  }
+}
 
 function load() {
   if (loaded || typeof window === "undefined") return;
   loaded = true;
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) jobs = JSON.parse(raw) as StoredJob[];
+    if (raw) {
+      jobs = JSON.parse(raw) as StoredJob[];
+      jobs.forEach((j) => {
+        if (isActive(j)) autoSaveIds.add(j.id);
+      });
+    }
   } catch {
     jobs = [];
   }
@@ -109,7 +163,7 @@ function tickDemo() {
     }
     if (downloaded >= target) {
       const done = new Date();
-      return {
+      const doneJob = {
         ...j,
         status: "completed" as const,
         progress: 100,
@@ -118,6 +172,11 @@ function tickDemo() {
         completed_at: done.toISOString(),
         expires_at: new Date(done.getTime() + MOCK_CONFIG.file_retention_hours * 3600_000).toISOString(),
       };
+      if (autoSaveIds.has(j.id)) {
+        autoSaveIds.delete(j.id);
+        enqueueBrowserDownload(doneJob);
+      }
+      return doneJob;
     }
     return {
       ...j,
@@ -129,11 +188,18 @@ function tickDemo() {
 }
 
 let polling = false;
+let consecutiveFailures = 0;
+
 async function tickRemote() {
   if (polling) return;
   polling = true;
   try {
     const active = jobs.filter((j) => isActive(j) && !isLocal(j));
+    if (active.length === 0) {
+      consecutiveFailures = 0;
+      setSyncError(null);
+      return;
+    }
     const updates = await Promise.allSettled(active.map((j) => getDownload(j.id)));
     const byId = new Map<string, Partial<StoredJob>>();
     let networkError: string | null = null;
@@ -150,8 +216,23 @@ async function tickRemote() {
         networkError = (u.reason as Error)?.message ?? "Backend tidak dapat dihubungi.";
       }
     });
-    setSyncError(byId.size === 0 ? networkError : null);
-    if (byId.size) set(jobs.map((j) => (byId.has(j.id) ? { ...j, ...byId.get(j.id)! } : j)));
+    if (byId.size > 0) {
+      consecutiveFailures = 0;
+      setSyncError(null);
+      const nextJobs = jobs.map((j) => (byId.has(j.id) ? { ...j, ...byId.get(j.id)! } : j));
+      nextJobs.forEach((j) => {
+        if (autoSaveIds.has(j.id) && j.status === "completed") {
+          autoSaveIds.delete(j.id);
+          enqueueBrowserDownload(j);
+        }
+      });
+      set(nextJobs);
+    } else {
+      consecutiveFailures++;
+      if (consecutiveFailures >= 2) {
+        setSyncError(networkError);
+      }
+    }
   } finally {
     polling = false;
   }
@@ -201,6 +282,13 @@ export async function startDownloads(
       items.map((i) => i.id),
       subtitleFormat,
     );
+    created.forEach((j) => {
+      if (j.status === "completed") {
+        enqueueBrowserDownload(j);
+      } else {
+        autoSaveIds.add(j.id);
+      }
+    });
     set([...created, ...jobs]);
     return created.length;
   }
@@ -227,6 +315,7 @@ export async function startDownloads(
       _t: Date.now() + idx * 250,
     };
   });
+  created.forEach((j) => autoSaveIds.add(j.id));
   set([...created, ...jobs]);
   return created.length;
 }
@@ -257,6 +346,7 @@ export function recordTextExport(result: AnalyzeResult, filename: string, size: 
 }
 
 export async function retryJob(id: string) {
+  autoSaveIds.add(id);
   if (!IS_DEMO) {
     const updated = await retryDownload(id);
     set(jobs.map((j) => (j.id === id ? { ...j, ...updated } : j)));

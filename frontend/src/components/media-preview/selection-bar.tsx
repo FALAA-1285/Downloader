@@ -38,7 +38,7 @@ export function SelectionBar({
     try {
       const n = await startDownloads(result, items, toSrt && vttCount > 0 ? "srt" : "original");
       onClear();
-      setToast({ ok: true, text: `${n} pekerjaan unduhan dibuat` });
+      setToast({ ok: true, text: `${n} unduhan dimulai. File akan otomatis tersimpan ke komputer saat selesai.` });
       setTimeout(() => setToast(null), 5000);
     } catch (e) {
       // Pilihan tetap dipertahankan agar pengguna bisa mencoba lagi.

@@ -273,7 +273,11 @@ def map_http_error(exc: Exception, url: str) -> AppError:
     if isinstance(exc, httpx.ConnectError):
         text = str(exc)
         if "CERTIFICATE_VERIFY_FAILED" in text or "certificate" in text.lower():
-            return AppError("tls_invalid", f"Sertifikat TLS {host} tidak valid.", 502)
+            return AppError(
+                "tls_invalid",
+                f"Sertifikat TLS {host} tidak valid. Domain ini kemungkinan diblokir oleh ISP / Internet Positif sehingga dialihkan ke laman blokir. Aktifkan VPN di perangkat server untuk mengaksesnya.",
+                502,
+            )
         return TransientError(f"Tidak dapat terhubung ke {host}.", code="upstream_unreachable")
     if isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError)):
         return TransientError(f"Koneksi ke {host} terputus.", code="upstream_disconnected")

@@ -37,10 +37,16 @@ def _total_from_content_range(value: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
-async def _probe_one(client: httpx.AsyncClient, item: Candidate, settings: Settings) -> None:
+async def _probe_one(
+    client: httpx.AsyncClient, item: Candidate, settings: Settings, referer: str | None = None
+) -> None:
     label = TYPE_LABEL.get(item.type, "Media")
-    for method, headers in (("HEAD", None), ("GET", {"Range": "bytes=0-0"})):
-        async with open_stream(client, item.url, settings, method=method, headers=headers) as (resp, _final):
+    base_headers = {"Referer": referer} if referer else {}
+    for method, extra_headers in (("HEAD", None), ("GET", {"Range": "bytes=0-0"})):
+        headers = dict(base_headers)
+        if extra_headers:
+            headers.update(extra_headers)
+        async with open_stream(client, item.url, settings, method=method, headers=headers or None) as (resp, _final):
             if method == "HEAD" and resp.status_code in (403, 405, 501):
                 continue  # sebagian server menolak HEAD
             if resp.status_code >= 400:
@@ -70,7 +76,9 @@ async def _probe_one(client: httpx.AsyncClient, item: Candidate, settings: Setti
             return
 
 
-async def probe_candidates(client: httpx.AsyncClient, items: list[Candidate], settings: Settings) -> list[str]:
+async def probe_candidates(
+    client: httpx.AsyncClient, items: list[Candidate], settings: Settings, referer: str | None = None
+) -> list[str]:
     """Memeriksa item secara in-place. Mengembalikan peringatan."""
     targets = [i for i in items if i.probe and i.downloadable][: settings.probe_limit]
     skipped = sum(1 for i in items if i.probe and i.downloadable) - len(targets)
@@ -79,7 +87,7 @@ async def probe_candidates(client: httpx.AsyncClient, items: list[Candidate], se
     async def guarded(item: Candidate) -> None:
         async with semaphore:
             try:
-                await _probe_one(client, item, settings)
+                await _probe_one(client, item, settings, referer=referer)
             except UnsafeURLError:
                 item.downloadable = False
                 item.reason = "Alamat media mengarah ke jaringan internal dan diblokir."

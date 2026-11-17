@@ -39,10 +39,10 @@ class Settings(BaseSettings):
 
     # Relatif terhadap folder backend/ jika bukan path absolut.
     storage_path: Path = Path("../storage")
-    max_download_size_mb: int = 200
+    max_download_size_mb: int = 1024
     max_subtitle_size_mb: int = 5
-    max_storage_mb: int = 2048
-    download_timeout_seconds: int = 120
+    max_storage_mb: int = 10240
+    download_timeout_seconds: int = 600
     download_max_retries: int = 2
     download_concurrency: int = 3
     file_retention_hours: int = 24
@@ -51,16 +51,16 @@ class Settings(BaseSettings):
     # Job `pending` yang tidak diambil worker selama ini dianggap hilang dari antrean.
     stale_pending_seconds: int = 3600
 
-    analyze_timeout_seconds: float = 25.0
+    analyze_timeout_seconds: float = 60.0
     analyze_concurrency: int = 4
-    connect_timeout_seconds: float = 10.0
-    read_timeout_seconds: float = 20.0
+    connect_timeout_seconds: float = 25.0
+    read_timeout_seconds: float = 30.0
     max_page_size_mb: float = 5.0
     max_redirects: int = 5
-    max_media_items: int = 300
+    max_media_items: int = 500
     probe_limit: int = 80
-    probe_concurrency: int = 8
-    probe_budget_seconds: float = 10.0
+    probe_concurrency: int = 4
+    probe_budget_seconds: float = 5.0
     allowed_ports: str = "80,443,8080,8443"
     user_agent: str = "UniversalMediaDownloader/0.1 (personal use)"
 
@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     allowed_client_networks: str = "127.0.0.0/8,::1/128"
     # Jika diisi, semua request API wajib membawa header `Authorization: Bearer <token>`.
     api_token: str | None = None
-    max_request_body_kb: int = 64
+    max_request_body_kb: int = 256
     rate_limit_analyze_per_minute: int = 20
     rate_limit_downloads_per_minute: int = 30
 

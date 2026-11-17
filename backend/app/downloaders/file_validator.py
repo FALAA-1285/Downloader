@@ -5,6 +5,7 @@ Hanya format dalam allowlist yang disimpan; file lain (termasuk executable) dito
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass
 
@@ -75,6 +76,12 @@ FTYP_BRANDS = {
             b"M4V ",
             b"M4VP",
             b"f4v ",
+            b"mp4v",
+            b"isml",
+            b"3gp4",
+            b"3gp5",
+            b"3gp6",
+            b"MSNV",
         ),
         "mp4",
     ),
@@ -125,7 +132,17 @@ def detect(head: bytes) -> str | None:
     if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return "wav"
     if head[4:8] == b"ftyp":
-        return FTYP_BRANDS.get(head[8:12])  # brand tak dikenal (mis. HEIC) → ditolak
+        brand = FTYP_BRANDS.get(head[8:12])
+        if brand:
+            return brand
+        # Cek compatible brands di dalam box ftyp jika major brand belum dikenali
+        with contextlib.suppress(Exception):
+            box_len = min(int.from_bytes(head[:4], "big"), len(head))
+            for offset in range(16, box_len - 3, 4):
+                compat = FTYP_BRANDS.get(head[offset : offset + 4])
+                if compat:
+                    return compat
+        return None
     if head.startswith(b"\x1a\x45\xdf\xa3"):
         return "webm" if b"webm" in head[:64] else "mkv"
     if head.startswith(b"OggS"):

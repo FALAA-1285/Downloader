@@ -90,7 +90,7 @@ class GenericAdapter(Adapter):
             warnings.append(f"Ditemukan {len(media)} media; hanya {settings.max_media_items} pertama yang ditampilkan.")
             media = media[: settings.max_media_items]
 
-        warnings.extend(await probe_candidates(ctx.client, media, settings))
+        warnings.extend(await probe_candidates(ctx.client, media, settings, referer=final_url))
 
         if ctx.wants("text") and not text:
             warnings.append("Teks utama tidak terdeteksi pada halaman ini.")

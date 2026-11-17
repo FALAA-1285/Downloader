@@ -16,11 +16,14 @@ import errno
 import logging
 import os
 import shutil
+import subprocess
 import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
+import yt_dlp
 from sqlalchemy import func, select, update
 
 from app.core.config import Settings
@@ -92,9 +95,10 @@ async def run_download(job_id: uuid.UUID, sessions: SessionFactory, settings: Se
         except asyncio.CancelledError:
             await asyncio.shield(_fail(sessions, job_id, "Pekerjaan dihentikan karena server berhenti."))
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("download %s gagal", job_id)
-            await _fail(sessions, job_id, UNEXPECTED)
+            err_msg = f"{UNEXPECTED} ({type(exc).__name__}: {exc})" if settings.app_env == "development" else UNEXPECTED
+            await _fail(sessions, job_id, err_msg)
             return
 
 
@@ -108,6 +112,8 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
         await s.commit()
         media_url, media_type = job.media_url, job.media_type
         display_name, options = job.filename, job.options or {}
+        platform = job.platform
+        source_url = job.source_url
 
     validate_url(media_url, settings.port_allowlist)
     await _check_storage_capacity(sessions, settings, incoming=None, exclude=None)
@@ -115,9 +121,21 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
     await asyncio.to_thread(settings.temp_dir.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(settings.downloads_dir.mkdir, parents=True, exist_ok=True)
     tmp_path = settings.temp_dir / f"{job_id.hex}.part"
+    is_social = (
+        platform in ("youtube", "instagram", "facebook", "tiktok", "x", "social_other")
+        or options.get("downloader") == "yt-dlp"
+    )
     try:
-        async with asyncio.timeout(settings.download_timeout_seconds):
-            head, size = await _stream_to_file(job_id, media_url, media_type, tmp_path, sessions, settings)
+        if is_social:
+            loop = asyncio.get_running_loop()
+            head, size = await asyncio.to_thread(
+                _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions
+            )
+        else:
+            async with asyncio.timeout(settings.download_timeout_seconds):
+                head, size = await _stream_to_file(
+                    job_id, media_url, media_type, tmp_path, sessions, settings, referer=source_url
+                )
         await _finalize(job_id, tmp_path, head, size, media_type, display_name, options, sessions, settings)
     except TimeoutError as exc:
         raise TransientError(
@@ -129,6 +147,111 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
         await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
 
 
+def _download_ytdlp_sync(
+    url: str,
+    media_type: str,
+    tmp_path: Path,
+    options: dict,
+    job_id: uuid.UUID,
+    loop: asyncio.AbstractEventLoop,
+    sessions: SessionFactory,
+) -> tuple[bytes, int]:
+    clean_url = url.split("#")[0]
+    out_base = tmp_path.parent / f"{job_id.hex}_ytdlp"
+    out_tmpl = str(out_base) + ".%(ext)s"
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_dir = str(Path(ffmpeg_bin).resolve().parent) if ffmpeg_bin else None
+
+    last_update_time = 0.0
+
+    async def _update_db(status: str, downloaded: int, total: int | None) -> None:
+        try:
+            async with sessions() as s:
+                job = await s.get(DownloadJob, job_id)
+                if job and job.status not in ("completed", "failed"):
+                    job.status = status
+                    job.size_downloaded = downloaded
+                    if total and total > 0:
+                        job.size_total = total
+                    await s.commit()
+        except Exception as exc:
+            log.debug("gagal memperbarui progres ke database: %s", exc)
+
+    def progress_hook(d: dict[str, Any]) -> None:
+        nonlocal last_update_time
+        now = time.monotonic()
+        status = d.get("status")
+        if status == "downloading":
+            downloaded = d.get("downloaded_bytes") or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if now - last_update_time >= 1.0:
+                last_update_time = now
+                asyncio.run_coroutine_threadsafe(_update_db("downloading", downloaded, total), loop)
+        elif status == "finished":
+            total = d.get("total_bytes") or d.get("downloaded_bytes") or 0
+            asyncio.run_coroutine_threadsafe(_update_db("processing", total, total), loop)
+
+    ydl_opts: dict[str, Any] = {
+        "outtmpl": out_tmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 5,
+        "fragment_retries": 5,
+        "concurrent_fragment_downloads": 8,
+        "http_chunk_size": 10485760,
+        "buffersize": 1024 * 1024,
+        "updatetime": False,
+        "progress_hooks": [progress_hook],
+    }
+    if ffmpeg_dir:
+        ydl_opts["ffmpeg_location"] = ffmpeg_dir
+
+    format_id = options.get("format_id")
+    if media_type == "audio":
+        ydl_opts["format"] = "bestaudio/best"
+        ydl_opts["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ]
+    else:
+        if format_id:
+            ydl_opts["format"] = format_id
+        else:
+            ydl_opts["format"] = (
+                "best[ext=mp4][height<=1080]/"
+                "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1080]+bestaudio/"
+                "best"
+            )
+        ydl_opts["merge_output_format"] = "mp4"
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([clean_url])
+    except yt_dlp.utils.DownloadError as exc:
+        clean_msg = str(exc).split("ERROR:")[-1].strip()
+        raise AppError("download_failed", f"Gagal mengunduh media dari platform: {clean_msg}", 502) from exc
+
+    candidates = list(tmp_path.parent.glob(f"{job_id.hex}_ytdlp.*"))
+    if not candidates:
+        raise AppError("download_failed", "File unduhan tidak ditemukan di penyimpanan sementara.", 500)
+
+    res_file = candidates[0]
+    if tmp_path.exists():
+        tmp_path.unlink()
+    res_file.replace(tmp_path)
+
+    size = tmp_path.stat().st_size
+    head = tmp_path.read_bytes()[:SNIFF_BYTES]
+    return head, size
+
+
 def _size_limit(media_type: str, settings: Settings) -> tuple[int, str]:
     if media_type == "subtitle":
         return min(settings.max_subtitle_bytes, settings.max_download_bytes), f"{settings.max_subtitle_size_mb} MB"
@@ -136,12 +259,21 @@ def _size_limit(media_type: str, settings: Settings) -> tuple[int, str]:
 
 
 async def _stream_to_file(
-    job_id: uuid.UUID, url: str, media_type: str, tmp_path: Path, sessions: SessionFactory, settings: Settings
+    job_id: uuid.UUID,
+    url: str,
+    media_type: str,
+    tmp_path: Path,
+    sessions: SessionFactory,
+    settings: Settings,
+    referer: str | None = None,
 ) -> tuple[bytes, int]:
     max_bytes, limit_label = _size_limit(media_type, settings)
+    headers = {"Accept-Encoding": "identity"}
+    if referer:
+        headers["Referer"] = referer
     async with (
         build_client(settings) as client,
-        open_stream(client, url, settings, headers={"Accept-Encoding": "identity"}) as (resp, _final),
+        open_stream(client, url, settings, headers=headers) as (resp, _final),
     ):
         if resp.status_code >= 400:
             raise status_error(resp.status_code, subject="File")
@@ -250,41 +382,49 @@ async def _finalize(
     log.info("download %s selesai (%s bytes)", job_id, size)
 
 
+def _run_ffprobe(raw_binary: str, formats: str, path: Path) -> int:
+    try:
+        binary = str(Path(raw_binary).resolve())
+        proc = subprocess.run(  # noqa: S603 - argumen whitelist tetap, tanpa shell
+            [
+                binary,
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-format_whitelist",
+                formats,
+                "-show_entries",
+                "format=format_name",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            timeout=FFPROBE_TIMEOUT,
+        )
+        return proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        raise AppError(
+            "invalid_media", "Pemeriksaan file media melewati batas waktu. File tidak disimpan.", 422
+        ) from exc
+    except OSError as exc:
+        log.warning("ffprobe tidak dapat dijalankan (%s); pemeriksaan dilewati", exc)
+        return 0
+
+
 async def _ffprobe_check(path: Path, kind: Kind, settings: Settings) -> None:
     """Validasi kontainer media dengan ffprobe bila tersedia. File tidak pernah dieksekusi.
 
     `-protocol_whitelist file` mencegah ffprobe membuka URL/protokol lain yang dirujuk isi file,
     dan `-format_whitelist` memaksa demuxer sesuai hasil deteksi magic bytes.
     """
-    binary = shutil.which(settings.ffprobe_path)
+    found = shutil.which(settings.ffprobe_path)
     formats = FFPROBE_FORMATS.get(kind.name)
-    if not binary or not formats:
+    if not found or not formats:
         return
-    proc = await asyncio.create_subprocess_exec(
-        binary,
-        "-v",
-        "error",
-        "-protocol_whitelist",
-        "file",
-        "-format_whitelist",
-        formats,
-        "-show_entries",
-        "format=format_name",
-        "-of",
-        "csv=p=0",
-        str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        await asyncio.wait_for(proc.communicate(), timeout=FFPROBE_TIMEOUT)
-    except TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
-        raise AppError(
-            "invalid_media", "Pemeriksaan file media melewati batas waktu. File tidak disimpan.", 422
-        ) from exc
-    if proc.returncode != 0:
+    returncode = await asyncio.to_thread(_run_ffprobe, found, formats, path)
+    if returncode != 0:
         raise AppError("invalid_media", "File media rusak atau tidak dapat dibaca. File tidak disimpan.", 422)
 
 
