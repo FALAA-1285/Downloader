@@ -97,13 +97,16 @@ def extract_av(soup: BeautifulSoup, base: str) -> tuple[list[Candidate], list[st
         poster = el.get("poster")
         add(el.get("src"), default=default, poster=poster, width=el.get("width"), height=el.get("height"))
         for source in el.find_all("source"):
+            source_res = parse_int(source.get("res") or source.get("height"))
+            source_label = source.get("label") or source.get("title")
             add(
                 source.get("src"),
                 default=default,
                 mime=source.get("type"),
                 poster=poster,
-                width=el.get("width"),
-                height=el.get("height"),
+                width=parse_int(source.get("width")) or parse_int(el.get("width")),
+                height=source_res or parse_int(el.get("height")),
+                label=source_label,
             )
 
     for name in ("og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"):

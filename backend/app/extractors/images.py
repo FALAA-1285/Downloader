@@ -6,7 +6,23 @@ from bs4 import BeautifulSoup
 
 from .common import IMAGE_EXT, Candidate, absolutize, best_from_srcset, mime_from_ext, parse_int, url_ext
 
-LAZY_ATTRS = ("data-src", "data-original", "data-lazy-src", "data-lazy", "data-url")
+LAZY_ATTRS = (
+    "data-full-src",
+    "data-original",
+    "data-original-src",
+    "data-highres",
+    "data-zoom-src",
+    "data-large-file",
+    "data-large",
+    "data-src-large",
+    "data-full",
+    "data-origin",
+    "data-orig-file",
+    "data-src",
+    "data-lazy-src",
+    "data-lazy",
+    "data-url",
+)
 LAZY_SRCSET = ("srcset", "data-srcset", "data-lazy-srcset")
 
 
@@ -43,7 +59,15 @@ def extract_images(soup: BeautifulSoup, base: str) -> list[Candidate]:
 
     for img in soup.find_all("img"):
         alt = img.get("alt")
-        best = None
+        # Periksa apakah <img> berada dalam <a> yang menunjuk ke gambar asli beresolusi penuh
+        parent_a = img.find_parent("a", href=True)
+        highres_from_a = None
+        if parent_a:
+            a_href = absolutize(base, parent_a.get("href"))
+            if a_href and url_ext(a_href) in IMAGE_EXT:
+                highres_from_a = a_href
+
+        best = highres_from_a
         for attr in LAZY_SRCSET:
             best = best or best_from_srcset(img.get(attr))
         src = None
@@ -53,7 +77,7 @@ def extract_images(soup: BeautifulSoup, base: str) -> list[Candidate]:
                 src = value
                 break
         add(best or src, width=img.get("width"), height=img.get("height"), label=alt)
-        if best and src:
+        if best and src and best != src:
             add(src, width=img.get("width"), height=img.get("height"), label=alt)
 
     for source in soup.select("picture source"):

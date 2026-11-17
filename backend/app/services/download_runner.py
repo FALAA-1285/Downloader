@@ -225,19 +225,11 @@ def _download_ytdlp_sync(
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "192",
+                "preferredquality": "320",
             }
         ]
     else:
-        if format_id:
-            ydl_opts["format"] = format_id
-        else:
-            ydl_opts["format"] = (
-                "best[ext=mp4][height<=1080]/"
-                "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
-                "bestvideo[height<=1080]+bestaudio/"
-                "best"
-            )
+        ydl_opts["format"] = format_id if format_id else "bestvideo+bestaudio/best"
         ydl_opts["merge_output_format"] = "mp4"
 
     try:

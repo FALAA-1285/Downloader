@@ -59,9 +59,21 @@ async def extract_social_media(url: str, ctx: AnalysisContext, platform_name: st
         filesize = info.get("filesize") or info.get("filesize_approx")
         width = info.get("width")
         height = info.get("height")
-        resolution = f"{height}p" if height else "HD"
 
-        # Kualitas Terbaik (Full HD / 4K / Best)
+        res_tag = "Kualitas Tertinggi"
+        if height:
+            if height >= 2160:
+                res_tag = "4K (2160p)"
+            elif height >= 1440:
+                res_tag = "2K (1440p)"
+            elif height >= 1080:
+                res_tag = "1080p (Full HD)"
+            elif height >= 720:
+                res_tag = "720p (HD)"
+            else:
+                res_tag = f"{height}p"
+
+        # Kualitas Terbaik Asli (Max Bitrate & Resolution: 4K / 2K / 1080p60)
         media.append(
             Candidate(
                 type="video",
@@ -72,15 +84,37 @@ async def extract_social_media(url: str, ctx: AnalysisContext, platform_name: st
                 width=width,
                 height=height,
                 duration=duration,
-                label=f"{clean_title}.mp4 ({resolution})",
+                label=f"{clean_title}.mp4 ({res_tag} - Asli)",
                 preview_url=thumbnail,
                 probe=False,
                 options={
                     "downloader": "yt-dlp",
-                    "format_id": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+                    "format_id": "bestvideo+bestaudio/best",
                 },
             )
         )
+
+        # Opsi 1080p jika video aslinya lebih dari 1080p (misal 2K/4K)
+        if height and height > 1080:
+            media.append(
+                Candidate(
+                    type="video",
+                    url=f"{url}#1080p",
+                    mime_type="video/mp4",
+                    size=None,
+                    downloadable=True,
+                    width=1920 if width else None,
+                    height=1080,
+                    duration=duration,
+                    label=f"{clean_title}-1080p.mp4 (1080p Full HD)",
+                    preview_url=thumbnail,
+                    probe=False,
+                    options={
+                        "downloader": "yt-dlp",
+                        "format_id": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+                    },
+                )
+            )
 
         # Opsi 720p jika video aslinya lebih dari 720p (hemat kuota)
         if height and height > 720:
@@ -94,12 +128,12 @@ async def extract_social_media(url: str, ctx: AnalysisContext, platform_name: st
                     width=1280 if width else None,
                     height=720,
                     duration=duration,
-                    label=f"{clean_title}-720p.mp4 (720p)",
+                    label=f"{clean_title}-720p.mp4 (720p HD)",
                     preview_url=thumbnail,
                     probe=False,
                     options={
                         "downloader": "yt-dlp",
-                        "format_id": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
+                        "format_id": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
                     },
                 )
             )
@@ -116,12 +150,12 @@ async def extract_social_media(url: str, ctx: AnalysisContext, platform_name: st
                     width=854 if width else None,
                     height=480,
                     duration=duration,
-                    label=f"{clean_title}-480p.mp4 (480p - Cepat & Ringan)",
+                    label=f"{clean_title}-480p.mp4 (480p - Hemat Kuota)",
                     preview_url=thumbnail,
                     probe=False,
                     options={
                         "downloader": "yt-dlp",
-                        "format_id": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]/best",
+                        "format_id": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
                     },
                 )
             )
