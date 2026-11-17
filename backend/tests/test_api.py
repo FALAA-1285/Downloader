@@ -205,6 +205,18 @@ async def test_download_flow(app, client, web, settings):  # TC-10
     srt = await client.get(f"/api/v1/downloads/{jobs[1]['id']}/file")
     assert srt.text.startswith("1\n00:00:01,000 --> 00:00:02,000\nHalo")
 
+    # Uji pengemasan batch ZIP
+    import io
+    import zipfile
+    zip_res = await client.post("/api/v1/downloads/zip", json={"job_ids": [jobs[0]["id"], jobs[1]["id"]]})
+    assert zip_res.status_code == 200
+    assert zip_res.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(zip_res.content)) as zf:
+        names = zf.namelist()
+        assert len(names) == 2
+        assert any(n.endswith(".png") for n in names)
+        assert any(n.endswith(".srt") for n in names)
+
     history = (await client.get("/api/v1/history")).json()
     assert {h["id"] for h in history} == {j["id"] for j in jobs}
     assert (await client.get("/api/v1/history", params={"media_type": "subtitle"})).json()[0]["id"] == jobs[1]["id"]

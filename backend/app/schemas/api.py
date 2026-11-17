@@ -88,6 +88,11 @@ class CreateDownloadsRequest(BaseModel):
     subtitle_format: Literal["original", "srt"] = "original"
 
 
+class BatchZipRequest(BaseModel):
+    job_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    zip_name: str | None = None
+
+
 class DownloadJobOut(BaseModel):
     id: uuid.UUID
     status: JobStatus

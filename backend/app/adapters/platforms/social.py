@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 import yt_dlp
 
@@ -285,6 +286,40 @@ class OtherSocialAdapter(Adapter):
         return await extract_social_media(ctx.url, ctx, self.name)
 
 
+_ALL_YTDLP_EXTRACTORS: list[Any] | None = None
+
+
+def _get_ytdlp_extractors() -> list[Any]:
+    global _ALL_YTDLP_EXTRACTORS
+    if _ALL_YTDLP_EXTRACTORS is None:
+        _ALL_YTDLP_EXTRACTORS = yt_dlp.extractor.gen_extractors()
+    return _ALL_YTDLP_EXTRACTORS
+
+
+def is_ytdlp_supported(url: str) -> tuple[bool, str | None]:
+    """Cek apakah URL didukung oleh salah satu dari 1.800+ extractor bawaan yt-dlp."""
+    try:
+        extractors = _get_ytdlp_extractors()
+        for ie in extractors:
+            if ie.IE_NAME != "generic" and ie.suitable(url):
+                return True, ie.IE_NAME
+    except Exception as exc:
+        log.debug("Gagal memeriksa dukungan yt-dlp untuk %s: %s", url, exc)
+    return False, None
+
+
+class UniversalPlatformAdapter(Adapter):
+    id = "universal_video"
+    name = "Video Platform"
+    source_type = "social_other"
+    domains = ()
+    status = "active"
+    note = "Unduhan video dan audio dari 1.800+ platform didukung via yt-dlp."
+
+    async def analyze(self, ctx: AnalysisContext) -> AnalysisOutcome:
+        return await extract_social_media(ctx.url, ctx, self.name)
+
+
 SOCIAL_ADAPTERS: tuple[type[Adapter], ...] = (
     YouTubeAdapter,
     InstagramAdapter,
@@ -292,4 +327,5 @@ SOCIAL_ADAPTERS: tuple[type[Adapter], ...] = (
     TikTokAdapter,
     XAdapter,
     OtherSocialAdapter,
+    UniversalPlatformAdapter,
 )

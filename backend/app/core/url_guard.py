@@ -92,6 +92,87 @@ async def resolve_doh(host: str) -> list[str]:
     return addresses
 
 
+def resolve_doh_sync(host: str) -> list[str]:
+    """Versi sinkronus DoH untuk socket patch dan proses thread."""
+    if host in ("cloudflare-dns.com", "dns.adguard-dns.com", "dns.google"):
+        return []
+    now = time.monotonic()
+    if host in _DOH_CACHE:
+        cached_time, cached_ips = _DOH_CACHE[host]
+        if now - cached_time < _DOH_CACHE_TTL:
+            return cached_ips
+
+    import json
+    import urllib.request
+
+    endpoints = (
+        (
+            "https://cloudflare-dns.com/dns-query?name={host}&type=A",
+            {"Accept": "application/dns-json", "User-Agent": "curl/8.0"},
+        ),
+        ("https://dns.adguard-dns.com/resolve?name={host}&type=A", {"User-Agent": "curl/8.0"}),
+    )
+    addresses: list[str] = []
+    for url_tmpl, headers in endpoints:
+        try:
+            req = urllib.request.Request(url_tmpl.format(host=host), headers=headers)  # noqa: S310
+            with urllib.request.urlopen(req, timeout=5.0) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+                for ans in data.get("Answer", []):
+                    if ans.get("type") == 1:
+                        raw_ip = str(ans.get("data", "")).strip()
+                        try:
+                            ip = ipaddress.ip_address(raw_ip)
+                            if is_public_ip(ip) and ip.compressed not in addresses:
+                                addresses.append(ip.compressed)
+                        except ValueError:
+                            continue
+                if addresses:
+                    break
+        except Exception as exc:
+            log.debug("Sync DoH query gagal pada %s: %s", url_tmpl, exc)
+
+    if addresses:
+        _DOH_CACHE[host] = (now, addresses)
+    return addresses
+
+
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_PATCH_INSTALLED = False
+
+
+def install_doh_socket_patch() -> None:
+    """Menambal socket.getaddrinfo agar otomatis beralih ke DoH saat DNS lokal dibajak ISP."""
+    global _PATCH_INSTALLED
+    if _PATCH_INSTALLED:
+        return
+    _PATCH_INSTALLED = True
+
+    def _doh_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        try:
+            results = _ORIGINAL_GETADDRINFO(host, port, family, type, proto, flags)
+            if results and host and isinstance(host, str) and not host.startswith("127.") and host != "localhost":
+                first_ip = str(results[0][4][0]).split("%", 1)[0]
+                try:
+                    ip = ipaddress.ip_address(first_ip)
+                    if _is_isp_blocked_ip(ip):
+                        doh_ips = resolve_doh_sync(host)
+                        if doh_ips:
+                            return _ORIGINAL_GETADDRINFO(doh_ips[0], port, family, type, proto, flags)
+                except ValueError:
+                    pass
+            return results
+        except socket.gaierror:
+            if host and isinstance(host, str) and not host.startswith("127.") and host != "localhost":
+                doh_ips = resolve_doh_sync(host)
+                if doh_ips:
+                    return _ORIGINAL_GETADDRINFO(doh_ips[0], port, family, type, proto, flags)
+            raise
+
+    socket.getaddrinfo = _doh_getaddrinfo
+
+
+
 @dataclass(frozen=True)
 class ValidatedURL:
     url: str

@@ -38,8 +38,12 @@ export function SelectionBar({
     try {
       const n = await startDownloads(result, items, toSrt && vttCount > 0 ? "srt" : "original");
       onClear();
-      setToast({ ok: true, text: `${n} unduhan dimulai. File akan otomatis tersimpan ke komputer saat selesai.` });
-      setTimeout(() => setToast(null), 5000);
+      const msg =
+        n <= 3
+          ? `${n} unduhan dimulai. File akan otomatis tersimpan ke komputer saat selesai.`
+          : `${n} unduhan dimulai di server. Anda dapat mengunduh seluruhnya sekaligus sebagai file ZIP di tab Downloads / Riwayat.`;
+      setToast({ ok: true, text: msg });
+      setTimeout(() => setToast(null), 6000);
     } catch (e) {
       // Pilihan tetap dipertahankan agar pengguna bisa mencoba lagi.
       setToast({ ok: false, text: (e as Error).message || "Gagal membuat pekerjaan unduhan." });

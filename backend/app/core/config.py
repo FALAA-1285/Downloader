@@ -62,7 +62,10 @@ class Settings(BaseSettings):
     probe_concurrency: int = 4
     probe_budget_seconds: float = 5.0
     allowed_ports: str = "80,443,8080,8443"
-    user_agent: str = "UniversalMediaDownloader/0.1 (personal use)"
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
 
     frontend_origin: str = "http://localhost:3000,http://127.0.0.1:3000"
     allowed_hosts: str = "localhost,127.0.0.1,backend"

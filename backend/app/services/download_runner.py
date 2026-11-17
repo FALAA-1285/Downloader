@@ -135,10 +135,20 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
                 _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions, source_url
             )
         else:
-            async with asyncio.timeout(settings.download_timeout_seconds):
-                head, size = await _stream_to_file(
-                    job_id, media_url, media_type, tmp_path, sessions, settings, referer=source_url
-                )
+            try:
+                async with asyncio.timeout(settings.download_timeout_seconds):
+                    head, size = await _stream_to_file(
+                        job_id, media_url, media_type, tmp_path, sessions, settings, referer=source_url
+                    )
+            except AppError as exc:
+                if exc.status_code in (401, 403) and media_type in ("video", "audio"):
+                    log.info("direct stream %s gagal (%s), beralih ke yt-dlp", media_url, exc.message)
+                    loop = asyncio.get_running_loop()
+                    head, size = await asyncio.to_thread(
+                        _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions, source_url
+                    )
+                else:
+                    raise
         await _finalize(job_id, tmp_path, head, size, media_type, display_name, options, sessions, settings)
     except TimeoutError as exc:
         raise TransientError(
@@ -269,7 +279,13 @@ async def _stream_to_file(
     referer: str | None = None,
 ) -> tuple[bytes, int]:
     max_bytes, limit_label = _size_limit(media_type, settings)
-    headers = {"Accept-Encoding": "identity"}
+    headers = {
+        "Accept-Encoding": "identity",
+        "User-Agent": settings.user_agent,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+        "Sec-Fetch-Mode": "no-cors",
+    }
     if referer:
         headers["Referer"] = referer
     async with (

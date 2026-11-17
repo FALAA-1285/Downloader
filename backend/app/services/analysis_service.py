@@ -43,7 +43,7 @@ class AnalysisService:
 
     async def analyze(self, session: AsyncSession, raw_url: str, media_types: list[str]) -> AnalyzeResponse:
         target = validate_url(raw_url, self.settings.port_allowlist)
-        adapter = self.registry.resolve(target.domain)
+        adapter = self.registry.resolve(target.domain, url=target.url)
         if adapter is self.registry.generic and "generic" in self.registry.disabled:
             raise AppError("adapter_disabled", "Analisis website umum sedang dinonaktifkan.", 503)
 

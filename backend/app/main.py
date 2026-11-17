@@ -21,10 +21,15 @@ from app.api.routes import analyze, downloads, history, system
 from app.core.config import APP_VERSION, Settings, get_settings
 from app.core.errors import AppError
 from app.core.ratelimit import RateLimiter
+from app.core.url_guard import install_doh_socket_patch
 from app.models.db import make_engine, make_session_factory
 from app.services.analysis_service import AnalysisService
 from app.services.cleanup import run_cleanup
 from app.workers.queue import make_queue
+
+# Pasang socket monkeypatch sedini mungkin agar semua request HTTP/DoH/yt-dlp
+# bebas dari gangguan pembajakan DNS lokal ISP.
+install_doh_socket_patch()
 
 log = logging.getLogger("app")
 
@@ -132,7 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         first = exc.errors()[0] if exc.errors() else {}
         loc = [str(p) for p in first.get("loc", []) if p not in ("body", "query", "path")]
         field = FIELD_LABELS.get(loc[0], loc[0]) if loc else "permintaan"
-        return _error(422, "invalid_request", f"Nilai {field} tidak valid.")
+        msg = first.get("msg")
+        detail = f"Nilai {field} tidak valid ({msg})." if msg and "Value error" not in msg else f"Nilai {field} tidak valid."
+        return _error(422, "invalid_request", detail)
 
     @app.exception_handler(Exception)
     async def unhandled(_request: Request, exc: Exception) -> JSONResponse:

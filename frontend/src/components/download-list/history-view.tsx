@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { History, Search, Trash2 } from "lucide-react";
+import { Archive, History, Search, Trash2 } from "lucide-react";
 import type { JobStatus, MediaType } from "@/types";
 import { MEDIA_LABEL, STATUS_LABEL, cn, formatBytes, formatDate } from "@/lib/utils";
-import { isExpired, removeJob, removeJobs, syncHistory, useJobs } from "@/services/jobs-store";
+import { downloadBatchAsZip, isExpired, removeJob, removeJobs, syncHistory, useJobs } from "@/services/jobs-store";
 import { useNow } from "@/hooks/use-now";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -25,6 +25,7 @@ export function HistoryView() {
   const [type, setType] = useState<MediaType | "all">("all");
   const [status, setStatus] = useState<JobStatus | "all">("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [zipping, setZipping] = useState(false);
 
   useEffect(() => {
     void syncHistory();
@@ -113,21 +114,47 @@ export function HistoryView() {
       {picked.length > 0 && (
         <div className="flex items-center justify-between border-b border-line bg-brand-soft/50 px-5 py-2 text-[13px] sm:px-10">
           <span className="text-ink">{picked.length} riwayat dipilih</span>
-          <ConfirmDialog
-            title={`Hapus ${picked.length} riwayat?`}
-            description="Riwayat yang dipilih beserta file sementaranya di server akan dihapus permanen."
-            confirmLabel={`Hapus ${picked.length}`}
-            onConfirm={async () => {
-              await removeJobs(picked);
-              setSelected(new Set());
-            }}
-            trigger={
-              <Button size="sm" variant="ghost-destructive">
-                <Trash2 aria-hidden />
-                Hapus {picked.length}
+          <div className="flex items-center gap-2">
+            {rows.filter((r) => selected.has(r.id) && r.status === "completed" && !isExpired(r, now)).length > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={zipping}
+                className="gap-1.5 text-[12px]"
+                onClick={async () => {
+                  setZipping(true);
+                  try {
+                    const completedIds = rows
+                      .filter((r) => selected.has(r.id) && r.status === "completed" && !isExpired(r, now))
+                      .map((r) => r.id);
+                    await downloadBatchAsZip(completedIds);
+                  } catch (e) {
+                    alert((e as Error).message || "Gagal mengunduh ZIP");
+                  } finally {
+                    setZipping(false);
+                  }
+                }}
+              >
+                <Archive className="size-3.5" aria-hidden />
+                Unduh ZIP ({rows.filter((r) => selected.has(r.id) && r.status === "completed" && !isExpired(r, now)).length})
               </Button>
-            }
-          />
+            )}
+            <ConfirmDialog
+              title={`Hapus ${picked.length} riwayat?`}
+              description="Riwayat yang dipilih beserta file sementaranya di server akan dihapus permanen."
+              confirmLabel={`Hapus ${picked.length}`}
+              onConfirm={async () => {
+                await removeJobs(picked);
+                setSelected(new Set());
+              }}
+              trigger={
+                <Button size="sm" variant="ghost-destructive">
+                  <Trash2 aria-hidden />
+                  Hapus {picked.length}
+                </Button>
+              }
+            />
+          </div>
         </div>
       )}
 

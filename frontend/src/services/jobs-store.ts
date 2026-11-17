@@ -12,6 +12,7 @@ import {
   IS_DEMO,
   createDownloads,
   deleteHistory,
+  downloadZipFile,
   fileUrl,
   getDownload,
   getHistory,
@@ -282,11 +283,16 @@ export async function startDownloads(
       items.map((i) => i.id),
       subtitleFormat,
     );
+    // Jika <= 3 item, otomatis unduh ke browser saat selesai.
+    // Jika lebih banyak (batch), biarkan tersimpan di server tanpa spamming puluhan dialog Save browser.
+    const shouldAutoSave = items.length <= 3;
     created.forEach((j) => {
-      if (j.status === "completed") {
-        enqueueBrowserDownload(j);
-      } else {
-        autoSaveIds.add(j.id);
+      if (shouldAutoSave) {
+        if (j.status === "completed") {
+          enqueueBrowserDownload(j);
+        } else {
+          autoSaveIds.add(j.id);
+        }
       }
     });
     set([...created, ...jobs]);
@@ -414,4 +420,8 @@ export function canFetchFile(j: StoredJob): boolean {
 
 export function saveJobFile(j: StoredJob): Promise<void> {
   return saveFileWithToken(j.id, j.filename);
+}
+
+export async function downloadBatchAsZip(jobIds: string[], zipName = "media_downloads"): Promise<void> {
+  await downloadZipFile(jobIds, zipName);
 }

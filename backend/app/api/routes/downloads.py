@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import logging
+import posixpath
+import tempfile
 import uuid
+import zipfile
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, status
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from app.api.deps import QueueDep, SessionDep, SettingsDep, rate_limit
-from app.schemas.api import CreateDownloadsRequest, DownloadJobOut
+from app.core.errors import AppError
+from app.schemas.api import BatchZipRequest, CreateDownloadsRequest, DownloadJobOut
 from app.services import download_service
 from app.services.serializers import job_out
 from app.workers.queue import DownloadQueue
@@ -71,6 +77,56 @@ async def download_file(job_id: uuid.UUID, session: SessionDep, settings: Settin
         media_type=file.mime_type,
         headers={
             "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file.filename)}",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.post("/zip", response_class=FileResponse)
+async def download_batch_zip(
+    body: BatchZipRequest, session: SessionDep, settings: SettingsDep
+) -> FileResponse:
+    """Mengemas beberapa file hasil unduhan menjadi satu file ZIP agar pengguna tidak perlu menyimpan satu per satu."""
+    servables = []
+    for jid in dict.fromkeys(body.job_ids):
+        try:
+            sf = await download_service.get_servable_file(session, settings, jid)
+            servables.append(sf)
+        except Exception as exc:
+            log.debug("melewati job %s saat membuat zip: %s", jid, exc)
+            continue
+
+    if not servables:
+        raise AppError("no_files", "Tidak ada file yang siap dikemas ke dalam ZIP.", 404)
+
+    tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=settings.temp_dir)
+    tmp_zip_path = Path(tmp_zip.name)
+    tmp_zip.close()
+
+    used_names: set[str] = set()
+    with zipfile.ZipFile(tmp_zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for sf in servables:
+            fname = sf.file.filename
+            base, ext = posixpath.splitext(fname) if "." in fname else (fname, f".{sf.file.extension}")
+            arcname = fname
+            counter = 1
+            while arcname.lower() in used_names:
+                arcname = f"{base}_{counter}{ext}"
+                counter += 1
+            used_names.add(arcname.lower())
+            zf.write(sf.path, arcname=arcname)
+
+    raw_name = body.zip_name or "media_downloads"
+    zip_filename = f"{raw_name}.zip"
+    ascii_name = zip_filename.encode("ascii", "ignore").decode() or "downloads.zip"
+
+    return FileResponse(
+        tmp_zip_path,
+        media_type="application/zip",
+        background=BackgroundTask(lambda: tmp_zip_path.unlink(missing_ok=True)),
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(zip_filename)}",
             "Content-Security-Policy": "default-src 'none'; sandbox",
             "Cache-Control": "private, no-store",
         },

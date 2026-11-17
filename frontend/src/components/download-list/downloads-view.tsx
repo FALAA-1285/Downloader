@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowDownToLine } from "lucide-react";
+import { Archive, ArrowDownToLine } from "lucide-react";
 import type { JobStatus } from "@/types";
-import { removeJobs, syncHistory, useJobs } from "@/services/jobs-store";
+import { downloadBatchAsZip, isExpired, removeJobs, syncHistory, useJobs } from "@/services/jobs-store";
 import { useNow } from "@/hooks/use-now";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -26,6 +26,7 @@ export function DownloadsView() {
   const jobs = useJobs();
   const now = useNow();
   const [filter, setFilter] = useState<Filter>("all");
+  const [zipping, setZipping] = useState(false);
 
   useEffect(() => {
     void syncHistory();
@@ -36,6 +37,7 @@ export function DownloadsView() {
   const count = (f: Filter) => jobs.filter((j) => matches(f, j.status)).length;
   const shown = jobs.filter((j) => matches(filter, j.status));
   const finished = jobs.filter((j) => j.status === "completed" || j.status === "failed").map((j) => j.id);
+  const completed = jobs.filter((j) => j.status === "completed" && !isExpired(j, now)).map((j) => j.id);
 
   return (
     <div className="frame flex flex-1 flex-col">
@@ -48,19 +50,42 @@ export function DownloadsView() {
           </>
         }
         actions={
-          finished.length > 0 && (
-            <ConfirmDialog
-              title={`Hapus ${finished.length} pekerjaan yang sudah selesai?`}
-              description="Riwayat pekerjaan yang selesai atau gagal, beserta file sementaranya di server, akan dihapus permanen."
-              confirmLabel={`Hapus ${finished.length}`}
-              onConfirm={() => removeJobs(finished)}
-              trigger={
-                <Button size="sm" variant="ghost">
-                  Bersihkan yang selesai
-                </Button>
-              }
-            />
-          )
+          <div className="flex items-center gap-2">
+            {completed.length > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={zipping}
+                className="gap-1.5 text-[12px]"
+                onClick={async () => {
+                  setZipping(true);
+                  try {
+                    await downloadBatchAsZip(completed);
+                  } catch (e) {
+                    alert((e as Error).message || "Gagal mengunduh ZIP");
+                  } finally {
+                    setZipping(false);
+                  }
+                }}
+              >
+                <Archive className="size-3.5" aria-hidden />
+                Unduh Semua ({completed.length}) .ZIP
+              </Button>
+            )}
+            {finished.length > 0 && (
+              <ConfirmDialog
+                title={`Hapus ${finished.length} pekerjaan yang sudah selesai?`}
+                description="Riwayat pekerjaan yang selesai atau gagal, beserta file sementaranya di server, akan dihapus permanen."
+                confirmLabel={`Hapus ${finished.length}`}
+                onConfirm={() => removeJobs(finished)}
+                trigger={
+                  <Button size="sm" variant="ghost">
+                    Bersihkan yang selesai
+                  </Button>
+                }
+              />
+            )}
+          </div>
         }
       />
 

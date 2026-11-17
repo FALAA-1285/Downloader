@@ -147,6 +147,30 @@ export async function saveFileWithToken(jobId: string, filename: string): Promis
   setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 
+export async function downloadZipFile(jobIds: string[], zipName = "media_downloads"): Promise<void> {
+  const res = await fetch(`${API}/downloads/zip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ job_ids: jobIds, zip_name: zipName }),
+    credentials: "omit",
+  });
+  if (!res.ok) {
+    let message = `Gagal mengemas file ZIP (HTTP ${res.status}).`;
+    try {
+      message = (await res.json()).detail?.message ?? message;
+    } catch {
+      // abaikan
+    }
+    throw new ApiError(message, res.status);
+  }
+  const href = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = `${zipName}.zip`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
 export async function getAdapters(): Promise<AdapterInfo[]> {
   if (IS_DEMO) return MOCK_ADAPTERS;
   return request<AdapterInfo[]>("/adapters");
