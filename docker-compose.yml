@@ -1,0 +1,68 @@
+# Stack lengkap sesuai PRD §15.1: frontend, backend, worker, redis, postgres.
+# Semua port hanya dibuka di 127.0.0.1 (PRD §15.3: jangan ekspos ke internet publik).
+#   cp .env.example .env
+#   docker compose up --build
+
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    REDIS_URL: redis://redis:6379/0
+    QUEUE_BACKEND: rq
+    STORAGE_PATH: /app/storage
+  volumes:
+    - storage:/app/storage
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    <<: *backend
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  worker:
+    <<: *backend
+    command: ["rq", "worker", "downloads", "--url", "redis://redis:6379/0"]
+
+  frontend:
+    build:
+      context: ./frondend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  storage:

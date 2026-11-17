@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --bg: #ffffff;
+  --surface: #fafafb;
+  --surface-2: #f3f4f6;
+  --line: #ebecef;
+  --line-strong: #dcdee3;
+  --ink: #1c1d1f;
+  --ink-2: #4b4e54;
+  --muted: #7a7d84;
+  --accent: #2563eb;
+  --accent-soft: #eaf1ff;
+  --ring: rgb(37 99 235 / 0.35);
+
+  --tag-image-bg: #f1edfe;  --tag-image-fg: #6941c6;
+  --tag-video-bg: #fdefe6;  --tag-video-fg: #c4320a;
+  --tag-subtitle-bg: #e4f6f2; --tag-subtitle-fg: #0f766e;
+  --tag-text-bg: #fdf5dc;   --tag-text-fg: #995c06;
+  --tag-audio-bg: #fdedf5;  --tag-audio-fg: #c11574;
+
+  --ok: #15803d;   --ok-bg: #e8f7ee;
+  --bad: #c62828;  --bad-bg: #fdecec;
+  --run: #2563eb;  --run-bg: #eaf1ff;
+  --idle: #6b6f76; --idle-bg: #f0f1f3;
+
+  --shadow-window: 0 1px 0 rgb(0 0 0 / 0.02), 0 12px 32px -12px rgb(17 24 39 / 0.14), 0 2px 6px -2px rgb(17 24 39 / 0.06);
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #0f1012;
+  --surface: #151619;
+  --surface-2: #1c1d21;
+  --line: #26282d;
+  --line-strong: #33363c;
+  --ink: #eef0f3;
+  --ink-2: #b9bcc3;
+  --muted: #8b8f97;
+  --accent: #5b8cff;
+  --accent-soft: #1a2540;
+  --ring: rgb(91 140 255 / 0.4);
+
+  --tag-image-bg: #2a2142;  --tag-image-fg: #c4b2ff;
+  --tag-video-bg: #3a2318;  --tag-video-fg: #ffb08a;
+  --tag-subtitle-bg: #16302c; --tag-subtitle-fg: #6ee0c8;
+  --tag-text-bg: #33290f;   --tag-text-fg: #f3cd6b;
+  --tag-audio-bg: #3a1a2b;  --tag-audio-fg: #ff9fcf;
+
+  --ok: #4ade80;   --ok-bg: #12291b;
+  --bad: #ff8a8a;  --bad-bg: #351718;
+  --run: #7aa2ff;  --run-bg: #1a2540;
+  --idle: #9aa0a8; --idle-bg: #22242a;
+
+  --shadow-window: 0 0 0 1px rgb(255 255 255 / 0.02), 0 16px 40px -12px rgb(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-bad: var(--bad);
+  --color-bad-bg: var(--bad-bg);
+  --color-run: var(--run);
+  --color-run-bg: var(--run-bg);
+  --color-idle: var(--idle);
+  --color-idle-bg: var(--idle-bg);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-inter-tight), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --shadow-window: var(--shadow-window);
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.ui-checkbox {
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.ui-checkbox:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='white' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.ui-checkbox:indeterminate {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8h7' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+/* Bingkai halaman bergaya "guide lines": kolom tengah dengan garis tepi vertikal. */
+.frame {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+  border-inline: 1px solid var(--line);
+}
+
+[role="toolbar"],
+[role="tablist"] {
+  scrollbar-width: none;
+}
+
+.dotgrid {
+  background-image: radial-gradient(var(--line-strong) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* Satu momen animasi: baris tabel di hero muncul berurutan seperti sedang dianalisis. */
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes scan {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(400%); }
+}
+@keyframes indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+.row-in {
+  opacity: 0;
+  animation: row-in 420ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.scanbar {
+  animation: scan 1.6s ease-in-out infinite;
+}
+.indeterminate {
+  animation: indeterminate 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-in { animation: none; opacity: 1; }
+  .scanbar, .indeterminate { animation-duration: 4s; }
+  * { scroll-behavior: auto !important; transition-duration: 0ms !important; }
+}
