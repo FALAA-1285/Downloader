@@ -20,8 +20,6 @@ def make_engine(settings: Settings) -> AsyncEngine:
         def _fk_on(dbapi_conn, _record):  # pragma: no cover - sqlite only
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
-            cur.execute("PRAGMA journal_mode=WAL")
-            cur.execute("PRAGMA busy_timeout=30000")
             cur.close()
 
         return engine

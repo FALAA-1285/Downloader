@@ -10,7 +10,6 @@ from app.extractors.common import (
     AUDIO_EXT,
     IMAGE_EXT,
     STREAM_EXT,
-    STREAM_REASON,
     SUBTITLE_EXT,
     VIDEO_EXT,
     Candidate,
@@ -129,17 +128,19 @@ class GenericAdapter(Adapter):
             raise AppError("unsupported_content", f"Tipe konten {mime or 'tidak dikenal'} tidak didukung.", 422)
         media_type = "video" if kind == "stream" else kind
         size = int(length) if length and length.isdigit() else None
+        is_stream = kind == "stream"
         item = Candidate(
             type=media_type,
             url=url,
-            mime_type=mime or mime_from_ext(ext),
+            mime_type="video/mp4" if is_stream else (mime or mime_from_ext(ext)),
             size=size,
             preview_url=url if media_type == "image" else None,
             probe=False,
+            downloadable=True,
+            reason=None,
+            options={"downloader": "yt-dlp"} if is_stream else None,
         )
-        if kind == "stream":
-            item.downloadable, item.reason = False, STREAM_REASON
-        elif size is not None and size > ctx.settings.max_download_bytes:
+        if not is_stream and size is not None and size > ctx.settings.max_download_bytes:
             item.downloadable = False
             item.reason = f"Ukuran file melebihi batas {ctx.settings.max_download_size_mb} MB yang diizinkan."
         warnings = [] if ctx.wants(media_type) else [f"URL ini adalah file {media_type} langsung."]

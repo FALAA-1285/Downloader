@@ -84,7 +84,7 @@ async def test_analyze_page(client, web):  # TC-05, TC-06, TC-07, TC-08
     clip = by_name(data, "klip.mp4")
     assert clip["downloadable"] and clip["size"] == 4096  # fallback HEAD → GET Range
     live = by_name(data, "live.m3u8")
-    assert not live["downloadable"]
+    assert live["downloadable"] and (live.get("options") or {}).get("downloader") == "yt-dlp"
 
     stored = await client.get(f"/api/v1/jobs/{data['id']}/media")
     assert stored.json()["media"] == data["media"]
@@ -133,12 +133,32 @@ async def test_analyze_upstream_errors(client, web):
     assert slow.status_code == 502 and "batas waktu" in slow.json()["detail"]["message"]
 
 
-async def test_platform_recognized_but_not_downloadable(client, web):
-    res = await analyze(client, url="https://www.youtube.com/watch?v=abc")
+async def test_platform_recognized_but_not_downloadable(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.adapters.platforms.social._ytdlp_extract_sync",
+        lambda url: {
+            "title": "Video Uji Coba",
+            "webpage_url": "https://www.youtube.com/watch?v=12345678901",
+            "duration": 60,
+            "thumbnail": "https://i.ytimg.com/vi/12345678901/hqdefault.jpg",
+            "formats": [
+                {
+                    "format_id": "18",
+                    "ext": "mp4",
+                    "width": 640,
+                    "height": 360,
+                    "filesize": 1024000,
+                    "url": "https://googlevideo.com/videoplayback",
+                }
+            ],
+        },
+    )
+    res = await analyze(client, url="https://www.youtube.com/watch?v=12345678901")
+    assert res.status_code == 200
     data = res.json()
     assert data["source"]["type"] == "youtube"
-    assert data["media"] == [] and "evaluasi" in data["warnings"][0]
-    assert not web.calls  # tidak ada request ke platform
+    assert data["page"]["title"] == "Video Uji Coba"
+    assert len(data["media"]) > 0
 
 
 async def test_direct_file_url(client, web):
@@ -319,6 +339,6 @@ async def test_system_endpoints(client):
     health = (await client.get("/api/v1/health")).json()
     assert health["status"] == "ok" and health["database"]
     adapters = {a["id"]: a["status"] for a in (await client.get("/api/v1/adapters")).json()}
-    assert adapters["generic"] == "active" and adapters["youtube"] == "evaluating"
+    assert adapters["generic"] == "active" and adapters["youtube"] == "active"
     config = (await client.get("/api/v1/config")).json()
     assert config["max_download_size_mb"] == 1 and config["queue_backend"] == "inline"

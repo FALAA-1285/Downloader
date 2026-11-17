@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     allowed_client_networks: str = "127.0.0.0/8,::1/128"
     # Jika diisi, semua request API wajib membawa header `Authorization: Bearer <token>`.
     api_token: str | None = None
-    max_request_body_kb: int = 256
+    max_request_body_kb: int = 64
     rate_limit_analyze_per_minute: int = 20
     rate_limit_downloads_per_minute: int = 30
 

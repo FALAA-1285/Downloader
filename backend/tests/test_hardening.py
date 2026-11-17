@@ -178,7 +178,9 @@ async def test_cleanup_sweeps_orphan_and_temp_files(app):
 # --- Path traversal & akses file (PRD §14.3) ------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["../secret.txt", "..\\secret.txt", "sub/file.png", "/etc/passwd", "C:/Windows/win.ini"])
+@pytest.mark.parametrize(
+    "key", ["../secret.txt", "..\\secret.txt", "sub/file.png", "/etc/passwd", "C:/Windows/win.ini"]
+)
 def test_storage_key_traversal_rejected(settings, key):
     with pytest.raises(AppError) as e:
         download_service.safe_storage_path(settings, key)
@@ -206,7 +208,9 @@ async def test_internal_preview_urls_are_dropped(client, web):
         return_value=httpx.Response(200, headers={"Content-Type": "text/html"}, content=page)
     )
     for path in ("/a.mp4", "/b.mp4"):
-        web.head(f"https://pv.example{path}").mock(return_value=httpx.Response(200, headers={"Content-Type": "video/mp4"}))
+        web.head(f"https://pv.example{path}").mock(
+            return_value=httpx.Response(200, headers={"Content-Type": "video/mp4"})
+        )
     data = (await analyze(client, url="https://pv.example/", media_types=["video"])).json()
     assert data["page"]["thumbnail"] is None
     previews = {m["filename"]: m["preview_url"] for m in data["media"]}
@@ -219,7 +223,9 @@ async def test_login_form_is_a_warning_not_an_error(client, web):
     web.get("https://gallery.example/").mock(
         return_value=httpx.Response(200, headers={"Content-Type": "text/html"}, content=page)
     )
-    web.head("https://gallery.example/x.png").mock(return_value=httpx.Response(200, headers={"Content-Type": "image/png"}))
+    web.head("https://gallery.example/x.png").mock(
+        return_value=httpx.Response(200, headers={"Content-Type": "image/png"})
+    )
     res = await analyze(client, url="https://gallery.example/")
     assert res.status_code == 200
     assert any("form login" in w for w in res.json()["warnings"])
@@ -352,7 +358,18 @@ def sample_mp4(tmp_path: Path) -> Path:
         pytest.skip("ffmpeg/ffprobe tidak terpasang")
     out = tmp_path / "sample.mp4"
     subprocess.run(  # noqa: S603 - argumen tetap, tanpa shell
-        [FFMPEG, "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=5", "-pix_fmt", "yuv420p", str(out)],
+        [
+            FFMPEG,
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=32x32:rate=5",
+            "-pix_fmt",
+            "yuv420p",
+            str(out),
+        ],
         check=True,
         timeout=60,
     )
@@ -372,7 +389,7 @@ async def test_ffprobe_rejects_playlist_disguised_as_media(sample_mp4, tmp_path,
         f"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n{sample_mp4.name}\n#EXT-X-ENDLIST\n", encoding="utf-8"
     )
     # Tanpa whitelist, ffprobe mau membuka playlist ini sebagai HLS dan mengikuti rujukannya.
-    raw = subprocess.run(  # noqa: S603
+    raw = subprocess.run(  # noqa: S603, ASYNC221
         [FFPROBE, "-v", "error", "-show_entries", "format=format_name", "-of", "csv=p=0", str(playlist)],
         capture_output=True,
         text=True,

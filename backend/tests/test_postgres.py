@@ -65,8 +65,13 @@ async def test_status_check_constraint(pg_app):
     async with pg_app.state.sessions() as s:
         s.add(
             DownloadJob(
-                media_id="x", source_url="https://a.example/", media_url="https://a.example/x.png",
-                source_domain="a.example", platform="generic", media_type="image", filename="x.png",
+                media_id="x",
+                source_url="https://a.example/",
+                media_url="https://a.example/x.png",
+                source_domain="a.example",
+                platform="generic",
+                media_type="image",
+                filename="x.png",
                 status="bogus",
             )
         )

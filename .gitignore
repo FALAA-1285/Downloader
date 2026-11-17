@@ -28,3 +28,8 @@ htmlcov/
 # Node
 frontend/node_modules/
 frontend/.next/
+
+# yt-dlp and partial downloads
+*.part*
+*.ytdl
+

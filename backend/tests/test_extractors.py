@@ -78,10 +78,10 @@ def test_video_audio_detection():
     assert mp4.type == "video" and mp4.downloadable and mp4.height == 1080
     assert mp4.preview_url == "https://news.example/img/poster.jpg"
     hls = by_url["https://news.example/stream/master.m3u8"]
-    assert not hls.downloadable and "HLS" in hls.reason
+    assert hls.downloadable and hls.options.get("downloader") == "yt-dlp"
     assert by_url["https://news.example/audio/wawancara.mp3"].type == "audio"
     embed = by_url["https://www.youtube.com/embed/abc123"]
-    assert not embed.downloadable and "YouTube" in embed.reason
+    assert embed.downloadable and embed.options.get("downloader") == "yt-dlp"
     assert any("blob:" in w for w in warnings)
 
 

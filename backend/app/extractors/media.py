@@ -9,7 +9,6 @@ from bs4 import BeautifulSoup
 from .common import (
     AUDIO_EXT,
     STREAM_EXT,
-    STREAM_REASON,
     SUBTITLE_EXT,
     VIDEO_EXT,
     Candidate,
@@ -77,18 +76,20 @@ def extract_av(soup: BeautifulSoup, base: str) -> tuple[list[Candidate], list[st
             return
         ext = url_ext(url)
         media_type = "audio" if kind == "audio" else "video"
+        is_stream = kind == "stream"
         found[url] = Candidate(
             type=media_type,
             url=url,
-            mime_type=(mime or mime_from_ext(ext)),
-            downloadable=kind != "stream",
-            reason=STREAM_REASON if kind == "stream" else None,
+            mime_type="video/mp4" if is_stream else (mime or mime_from_ext(ext)),
+            downloadable=True,
+            reason=None,
             preview_url=absolutize(base, poster) if media_type == "video" else None,
             width=parse_int(width),
             height=parse_int(height),
-            label=label,
+            label=label or (f"{media_type}.mp4 (HLS Stream)" if is_stream else None),
             duration=duration,
-            probe=kind != "stream",
+            probe=False if is_stream else True,
+            options={"downloader": "yt-dlp"} if is_stream else None,
         )
 
     for el in soup.find_all(["video", "audio"]):
@@ -138,10 +139,11 @@ def extract_av(soup: BeautifulSoup, base: str) -> tuple[list[Candidate], list[st
             found[url] = Candidate(
                 type="video",
                 url=url,
-                downloadable=False,
-                reason=f"Video tersemat dari {platform}. Belum ada integrasi resmi yang berizin untuk platform ini.",
-                label=f"{platform.lower()}-embed",
+                downloadable=True,
+                reason=None,
+                label=f"{platform} Embed Video",
                 probe=False,
+                options={"downloader": "yt-dlp"},
             )
 
     if blob_sources:

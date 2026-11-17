@@ -124,12 +124,15 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
     is_social = (
         platform in ("youtube", "instagram", "facebook", "tiktok", "x", "social_other")
         or options.get("downloader") == "yt-dlp"
+        or media_url.endswith((".m3u8", ".mpd"))
+        or ".m3u8" in media_url
+        or ".mpd" in media_url
     )
     try:
         if is_social:
             loop = asyncio.get_running_loop()
             head, size = await asyncio.to_thread(
-                _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions
+                _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions, source_url
             )
         else:
             async with asyncio.timeout(settings.download_timeout_seconds):
@@ -155,6 +158,7 @@ def _download_ytdlp_sync(
     job_id: uuid.UUID,
     loop: asyncio.AbstractEventLoop,
     sessions: SessionFactory,
+    source_url: str | None = None,
 ) -> tuple[bytes, int]:
     clean_url = url.split("#")[0]
     out_base = tmp_path.parent / f"{job_id.hex}_ytdlp"
@@ -192,6 +196,10 @@ def _download_ytdlp_sync(
             total = d.get("total_bytes") or d.get("downloaded_bytes") or 0
             asyncio.run_coroutine_threadsafe(_update_db("processing", total, total), loop)
 
+    headers = {}
+    if source_url:
+        headers["Referer"] = source_url
+
     ydl_opts: dict[str, Any] = {
         "outtmpl": out_tmpl,
         "quiet": True,
@@ -205,6 +213,7 @@ def _download_ytdlp_sync(
         "buffersize": 1024 * 1024,
         "updatetime": False,
         "progress_hooks": [progress_hook],
+        "http_headers": headers,
     }
     if ffmpeg_dir:
         ydl_opts["ffmpeg_location"] = ffmpeg_dir
