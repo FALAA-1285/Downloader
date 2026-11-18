@@ -57,6 +57,10 @@ class GenericAdapter(Adapter):
     async def analyze(self, ctx: AnalysisContext) -> AnalysisOutcome:
         settings = ctx.settings
         headers = {"Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"}
+        if ctx.headers:
+            headers.update(ctx.headers)
+        if ctx.cookies:
+            headers["Cookie"] = ctx.cookies
         async with open_stream(ctx.client, ctx.url, settings, headers=headers) as (resp, final_url):
             if resp.status_code >= 400:
                 raise status_error(resp.status_code)
@@ -105,6 +109,8 @@ class GenericAdapter(Adapter):
                     settings,
                     wants_video=ctx.wants("video"),
                     wants_subtitles=ctx.wants("subtitle"),
+                    cookies=ctx.cookies,
+                    headers=ctx.headers,
                 )
                 warnings.extend(dyn_warnings)
 

@@ -93,6 +93,11 @@ export interface ServerConfig {
   ffmpeg_version?: string;
 }
 
+export interface RequestAuthOptions {
+  cookies?: string | null;
+  headers?: Record<string, string> | null;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,

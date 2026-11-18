@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.config import Settings
-from app.extractors.dynamic import _is_media_url, render_and_sniff
+from app.extractors.dynamic import _is_media_url, _parse_cookies_for_playwright, render_and_sniff
 
 
 def test_is_media_url():
@@ -83,3 +83,18 @@ async def test_render_and_sniff_intercepts_media_mocked():
         urls = [c.url for c in candidates]
         assert "https://stream.example/master.m3u8?token=xyz" in urls
         assert "https://stream.example/subtitle.vtt" in urls
+
+
+def test_parse_cookies_for_playwright():
+    kv = "sessionid=abc123xyz; csrftoken=def456"
+    cookies = _parse_cookies_for_playwright(kv, "https://sub.example.com/video")
+    assert len(cookies) == 2
+    assert cookies[0]["name"] == "sessionid" and cookies[0]["value"] == "abc123xyz"
+    assert cookies[0]["domain"] == "sub.example.com"
+    assert cookies[1]["name"] == "csrftoken" and cookies[1]["value"] == "def456"
+
+    netscape = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tsession\tsecret123"
+    n_cookies = _parse_cookies_for_playwright(netscape, "https://example.com/test")
+    assert len(n_cookies) == 1
+    assert n_cookies[0]["name"] == "session" and n_cookies[0]["value"] == "secret123"
+    assert n_cookies[0]["domain"] == "example.com"

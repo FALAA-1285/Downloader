@@ -18,7 +18,9 @@ router = APIRouter(tags=["analyze"])
 )
 async def analyze(body: AnalyzeRequest, session: SessionDep, service: AnalysisDep) -> AnalyzeResponse:
     """Menganalisis URL dan mengembalikan media yang dapat diakses (FR-01 s.d. FR-07)."""
-    return await service.analyze(session, body.url, list(body.media_types))
+    return await service.analyze(
+        session, body.url, list(body.media_types), cookies=body.cookies, headers=body.headers
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=AnalysisJob)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
+import tempfile
 from typing import Any
 
 import yt_dlp
@@ -16,8 +18,8 @@ from app.extractors.common import Candidate, sanitize_filename
 log = logging.getLogger(__name__)
 
 
-def _ytdlp_extract_sync(url: str) -> dict:
-    ydl_opts = {
+def _ytdlp_extract_sync(url: str, cookies: str | None = None, headers: dict[str, str] | None = None) -> dict:
+    ydl_opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -27,23 +29,49 @@ def _ytdlp_extract_sync(url: str) -> dict:
         "check_formats": False,
         "no_color": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            return ydl.extract_info(url, download=False) or {}
-        except yt_dlp.utils.DownloadError as exc:
-            msg = str(exc)
-            if "Private video" in msg or "private" in msg.lower():
-                raise AppError("private_video", "Video ini bersifat privat atau tidak dapat diakses.", 422) from exc
-            if "Video unavailable" in msg or "not found" in msg.lower() or "404" in msg:
-                raise AppError("not_found", "Video tidak ditemukan atau telah dihapus.", 404) from exc
-            if "Sign in" in msg or "login" in msg.lower():
-                raise AppError("login_required", "Konten ini membutuhkan login atau dibatasi usia.", 422) from exc
-            clean_msg = msg.split("ERROR:")[-1].strip() if "ERROR:" in msg else msg
-            raise AppError("extract_failed", f"Gagal menganalisis video: {clean_msg}", 422) from exc
+    cookie_file = None
+    if cookies:
+        if any(c in cookies for c in ("\t", "# Netscape")):
+            tf = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt")
+            tf.write(cookies)
+            tf.flush()
+            tf.close()
+            cookie_file = tf.name
+            ydl_opts["cookiefile"] = cookie_file
+        else:
+            ydl_opts.setdefault("http_headers", {})["Cookie"] = cookies
+
+    if headers:
+        ydl_opts.setdefault("http_headers", {}).update(headers)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                return ydl.extract_info(url, download=False) or {}
+            except yt_dlp.utils.DownloadError as exc:
+                msg = str(exc)
+                if "Private video" in msg or "private" in msg.lower():
+                    raise AppError("private_video", "Video ini bersifat privat atau tidak dapat diakses.", 422) from exc
+                if "Video unavailable" in msg or "not found" in msg.lower() or "404" in msg:
+                    raise AppError("not_found", "Video tidak ditemukan atau telah dihapus.", 404) from exc
+                if "Sign in" in msg or "login" in msg.lower():
+                    raise AppError(
+                        "login_required",
+                        "Konten ini membutuhkan login atau dibatasi usia. Sertakan cookie sesi Anda.",
+                        422,
+                    ) from exc
+                clean_msg = msg.split("ERROR:")[-1].strip() if "ERROR:" in msg else msg
+                raise AppError("extract_failed", f"Gagal menganalisis video: {clean_msg}", 422) from exc
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.remove(cookie_file)
+            except OSError:
+                pass
 
 
 async def extract_social_media(url: str, ctx: AnalysisContext, platform_name: str) -> AnalysisOutcome:
-    info = await asyncio.to_thread(_ytdlp_extract_sync, url)
+    info = await asyncio.to_thread(_ytdlp_extract_sync, url, ctx.cookies, ctx.headers)
     if not info:
         raise AppError("empty_result", f"Tidak ada media yang ditemukan dari {platform_name}.", 422)
 

@@ -30,12 +30,16 @@ async def create_jobs(
     analysis_id: uuid.UUID,
     media_ids: list[str],
     subtitle_format: str,
+    cookies: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> list[DownloadJob]:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None or aware(analysis.expires_at) < utcnow():
         raise AppError("analysis_expired", "Hasil analisis sudah kedaluwarsa. Analisis ulang URL tersebut.", 404)
 
     items = {m["id"]: m for m in analysis.result.get("media", [])}
+    saved_cookies = cookies or analysis.result.get("cookies")
+    saved_headers = headers or analysis.result.get("headers")
     jobs: list[DownloadJob] = []
     for media_id in dict.fromkeys(media_ids):
         item = items.get(media_id)
@@ -52,6 +56,10 @@ async def create_jobs(
         options = dict(item.get("options") or {})
         if item["type"] == "subtitle":
             options["subtitle_format"] = subtitle_format
+        if saved_cookies:
+            options["cookies"] = saved_cookies
+        if saved_headers:
+            options["headers"] = saved_headers
         job_options = options or None
         job = DownloadJob(
             analysis_id=analysis.id,

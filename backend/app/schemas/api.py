@@ -16,6 +16,8 @@ SourceType = Literal["generic", "youtube", "instagram", "facebook", "tiktok", "x
 class AnalyzeRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     media_types: list[MediaType] = Field(default_factory=list, max_length=5)
+    cookies: str | None = Field(default=None, max_length=65536)
+    headers: dict[str, str] | None = None
 
 
 class SourceInfo(BaseModel):
@@ -86,6 +88,8 @@ class CreateDownloadsRequest(BaseModel):
         min_length=1, max_length=500
     )
     subtitle_format: Literal["original", "srt"] = "original"
+    cookies: str | None = Field(default=None, max_length=65536)
+    headers: dict[str, str] | None = None
 
 
 class BatchZipRequest(BaseModel):

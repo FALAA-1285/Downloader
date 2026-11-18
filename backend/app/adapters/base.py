@@ -21,6 +21,8 @@ class AnalysisContext:
     media_types: set[str]
     client: httpx.AsyncClient
     settings: Settings
+    cookies: str | None = None
+    headers: dict[str, str] | None = None
 
     def wants(self, media_type: str) -> bool:
         return not self.media_types or media_type in self.media_types

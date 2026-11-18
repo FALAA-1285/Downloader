@@ -47,12 +47,45 @@ def _is_media_url(url: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _parse_cookies_for_playwright(cookie_str: str, target_url: str) -> list[dict[str, Any]]:
+    """Ubah string cookie (format Netscape cookies.txt atau key=value;) menjadi list cookie Playwright."""
+    domain = urlsplit(target_url).hostname or "localhost"
+    cookies: list[dict[str, Any]] = []
+    lines = [l.strip() for l in cookie_str.strip().splitlines() if l.strip()]
+    if any("\t" in l for l in lines):
+        for line in lines:
+            if line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                d, _, p, _, _, name, val = parts[:7]
+                cookies.append({
+                    "name": name.strip(),
+                    "value": val.strip(),
+                    "domain": d.strip().lstrip("."),
+                    "path": p.strip() or "/",
+                })
+    else:
+        for chunk in cookie_str.split(";"):
+            if "=" in chunk:
+                k, v = chunk.strip().split("=", 1)
+                cookies.append({
+                    "name": k.strip(),
+                    "value": v.strip(),
+                    "domain": domain,
+                    "path": "/",
+                })
+    return cookies
+
+
 async def render_and_sniff(
     url: str,
     settings: Settings,
     *,
     wants_video: bool = True,
     wants_subtitles: bool = True,
+    cookies: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[str, list[Candidate], list[str]]:
     """Membuka halaman dengan Playwright Chromium, mengeksekusi JS, menyadap request media,
 
@@ -89,6 +122,16 @@ async def render_and_sniff(
                     viewport={"width": 1920, "height": 1080},
                     ignore_https_errors=True,
                 )
+                if headers:
+                    await context.set_extra_http_headers(headers)
+                if cookies:
+                    parsed_cookies = _parse_cookies_for_playwright(cookies, url)
+                    if parsed_cookies:
+                        try:
+                            await context.add_cookies(parsed_cookies)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("Gagal menyuntikkan cookie ke Playwright: %s", exc)
+
                 page = await context.new_page()
 
                 def _handle_intercept(target_url: str, content_type: str | None = None) -> None:

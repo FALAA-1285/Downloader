@@ -2,10 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useId, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, ClipboardPaste, Link2, Loader2, TriangleAlert } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronUp, ClipboardPaste, KeyRound, Link2, Loader2, TriangleAlert } from "lucide-react";
 import type { MediaType } from "@/types";
 import { checkUrl } from "@/lib/url";
 import { cn } from "@/lib/utils";
+import { getStoredCookies, setStoredCookies } from "@/services/api";
 import { Button } from "@/components/ui/button";
 import { TypeIcon } from "@/components/ui/primitives";
 
@@ -32,6 +33,8 @@ export function UrlForm({
   const [types, setTypes] = useState<MediaType[]>(defaultTypes);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [customCookies, setCustomCookies] = useState(() => getStoredCookies() || "");
 
   function toggle(t: MediaType) {
     setTypes((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
@@ -44,6 +47,9 @@ export function UrlForm({
       setError(res.message);
       inputRef.current?.focus();
       return;
+    }
+    if (customCookies.trim()) {
+      setStoredCookies(customCookies.trim());
     }
     setError(null);
     setSubmitting(true);
@@ -154,6 +160,37 @@ export function UrlForm({
           );
         })}
       </fieldset>
+
+      <div className={cn("mt-3 flex flex-col items-center", compact && "mt-2")}>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-ink"
+        >
+          <KeyRound className="size-3.5" aria-hidden />
+          <span>Opsi Sesi / Cookie Login</span>
+          {customCookies ? <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand">Aktif</span> : null}
+          {showAdvanced ? <ChevronUp className="size-3" aria-hidden /> : <ChevronDown className="size-3" aria-hidden />}
+        </button>
+        {showAdvanced && (
+          <div className="mt-2.5 w-full max-w-xl rounded-xl border border-line-strong bg-surface p-3 text-left">
+            <label htmlFor="custom-cookies-input" className="block text-[12px] font-medium text-ink">
+              Cookie Sesi (Netscape cookies.txt atau key=value;)
+            </label>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              Dibutuhkan untuk situs login, dibatasi usia, atau konten privat (YouTube member, Instagram, X, portal film).
+            </p>
+            <textarea
+              id="custom-cookies-input"
+              value={customCookies}
+              onChange={(e) => setCustomCookies(e.target.value)}
+              placeholder="sessionid=xyz123; csrftoken=abc; atau tempel format Netscape cookies.txt"
+              rows={2}
+              className="mt-2 w-full rounded-lg border border-line bg-bg p-2 font-mono text-[11px] text-ink outline-none placeholder:text-muted-foreground/60 focus:border-brand"
+            />
+          </div>
+        )}
+      </div>
     </form>
   );
 }

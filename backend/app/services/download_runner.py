@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from datetime import timedelta
@@ -138,7 +139,15 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
             try:
                 async with asyncio.timeout(settings.download_timeout_seconds):
                     head, size = await _stream_to_file(
-                        job_id, media_url, media_type, tmp_path, sessions, settings, referer=source_url
+                        job_id,
+                        media_url,
+                        media_type,
+                        tmp_path,
+                        sessions,
+                        settings,
+                        referer=source_url,
+                        cookies=options.get("cookies"),
+                        custom_headers=options.get("headers"),
                     )
             except AppError as exc:
                 if (exc.status_code in (401, 403) or exc.code in ("forbidden", "auth_required")) and media_type in ("video", "audio"):
@@ -210,6 +219,26 @@ def _download_ytdlp_sync(
     if source_url:
         headers["Referer"] = source_url
 
+    cookie_file = None
+    cookies = options.get("cookies")
+    if cookies:
+        if any(c in cookies for c in ("\t", "# Netscape")):
+            tf = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt")
+            tf.write(cookies)
+            tf.flush()
+            tf.close()
+            cookie_file = tf.name
+            ydl_opts_cookies: dict[str, Any] = {"cookiefile": cookie_file}
+        else:
+            headers["Cookie"] = cookies
+            ydl_opts_cookies = {}
+    else:
+        ydl_opts_cookies = {}
+
+    custom_headers = options.get("headers")
+    if isinstance(custom_headers, dict):
+        headers.update(custom_headers)
+
     ydl_opts: dict[str, Any] = {
         "outtmpl": out_tmpl,
         "quiet": True,
@@ -226,6 +255,7 @@ def _download_ytdlp_sync(
         "updatetime": False,
         "progress_hooks": [progress_hook],
         "http_headers": headers,
+        **ydl_opts_cookies,
     }
     if ffmpeg_dir:
         ydl_opts["ffmpeg_location"] = ffmpeg_dir
@@ -255,6 +285,12 @@ def _download_ytdlp_sync(
     except yt_dlp.utils.YoutubeDLError as exc:
         clean_msg = str(exc).split("ERROR:")[-1].strip()
         raise AppError("download_failed", f"Gagal mengunduh media dari platform: {clean_msg}", 502) from exc
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.remove(cookie_file)
+            except OSError:
+                pass
 
     candidates = [
         p
@@ -294,6 +330,8 @@ async def _stream_to_file(
     sessions: SessionFactory,
     settings: Settings,
     referer: str | None = None,
+    cookies: str | None = None,
+    custom_headers: dict[str, str] | None = None,
 ) -> tuple[bytes, int]:
     max_bytes, limit_label = _size_limit(media_type, settings)
     headers = {
@@ -305,6 +343,10 @@ async def _stream_to_file(
     }
     if referer:
         headers["Referer"] = referer
+    if custom_headers:
+        headers.update(custom_headers)
+    if cookies:
+        headers["Cookie"] = cookies
     async with (
         build_client(settings) as client,
         open_stream(client, url, settings, headers=headers) as (resp, _final),

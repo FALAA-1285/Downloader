@@ -46,7 +46,15 @@ async def create_downloads(
     body: CreateDownloadsRequest, session: SessionDep, settings: SettingsDep, queue: QueueDep
 ) -> list[DownloadJobOut]:
     """Membuat pekerjaan unduhan dari media hasil analisis (FR-08)."""
-    jobs = await download_service.create_jobs(session, settings, body.analysis_id, body.media_ids, body.subtitle_format)
+    jobs = await download_service.create_jobs(
+        session,
+        settings,
+        body.analysis_id,
+        body.media_ids,
+        body.subtitle_format,
+        cookies=body.cookies,
+        headers=body.headers,
+    )
     for job in jobs:
         if not await _enqueue_or_fail(session, queue, job.id):
             await session.refresh(job)

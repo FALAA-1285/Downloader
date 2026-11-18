@@ -41,7 +41,14 @@ class AnalysisService:
         except UnsafeURLError:
             return None
 
-    async def analyze(self, session: AsyncSession, raw_url: str, media_types: list[str]) -> AnalyzeResponse:
+    async def analyze(
+        self,
+        session: AsyncSession,
+        raw_url: str,
+        media_types: list[str],
+        cookies: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> AnalyzeResponse:
         target = validate_url(raw_url, self.settings.port_allowlist)
         adapter = self.registry.resolve(target.domain, url=target.url)
         if adapter is self.registry.generic and "generic" in self.registry.disabled:
@@ -54,6 +61,8 @@ class AnalysisService:
                 media_types=set(media_types),
                 client=client,
                 settings=self.settings,
+                cookies=cookies,
+                headers=headers,
             )
             try:
                 outcome = await asyncio.wait_for(adapter.analyze(ctx), self.settings.analyze_timeout_seconds)
@@ -107,6 +116,12 @@ class AnalysisService:
             analyzed_at=now,
         )
 
+        dump = result.model_dump(mode="json")
+        if cookies:
+            dump["cookies"] = cookies
+        if headers:
+            dump["headers"] = headers
+
         session.add(
             Analysis(
                 id=analysis_id,
@@ -114,7 +129,7 @@ class AnalysisService:
                 source_domain=target.domain,
                 platform=adapter.source_type,
                 title=outcome.title,
-                result=result.model_dump(mode="json"),
+                result=dump,
                 created_at=now,
                 expires_at=now + timedelta(hours=self.settings.analysis_retention_hours),
             )

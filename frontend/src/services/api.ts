@@ -7,6 +7,7 @@ import {
   type AnalyzeResult,
   type DownloadJob,
   type MediaType,
+  type RequestAuthOptions,
   type ServerConfig,
   type SubtitleFormat,
 } from "@/types";
@@ -60,9 +61,27 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 15_0
   }
 }
 
+export function getStoredCookies(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("umd_session_cookies") || null;
+}
+
+export function setStoredCookies(cookies: string | null) {
+  if (typeof window === "undefined") return;
+  if (cookies && cookies.trim()) {
+    localStorage.setItem("umd_session_cookies", cookies.trim());
+  } else {
+    localStorage.removeItem("umd_session_cookies");
+  }
+}
+
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export async function analyzeUrl(url: string, mediaTypes: MediaType[]): Promise<AnalyzeResult> {
+export async function analyzeUrl(
+  url: string,
+  mediaTypes: MediaType[],
+  authOptions?: RequestAuthOptions,
+): Promise<AnalyzeResult> {
   if (IS_DEMO) {
     await wait(1100 + Math.random() * 600);
     try {
@@ -71,9 +90,19 @@ export async function analyzeUrl(url: string, mediaTypes: MediaType[]): Promise<
       throw new ApiError((e as Error).message, 422);
     }
   }
+  const cookies = authOptions?.cookies ?? getStoredCookies();
+  const headers = authOptions?.headers;
   return request<AnalyzeResult>(
     "/analyze",
-    { method: "POST", body: JSON.stringify({ url, media_types: mediaTypes }) },
+    {
+      method: "POST",
+      body: JSON.stringify({
+        url,
+        media_types: mediaTypes,
+        ...(cookies ? { cookies } : {}),
+        ...(headers ? { headers } : {}),
+      }),
+    },
     ANALYZE_TIMEOUT_MS,
   );
 }
@@ -82,11 +111,23 @@ export async function createDownloads(
   analysisId: string,
   mediaIds: string[],
   subtitleFormat: SubtitleFormat = "original",
+  authOptions?: RequestAuthOptions,
 ): Promise<DownloadJob[]> {
+  const cookies = authOptions?.cookies ?? getStoredCookies();
+  const headers = authOptions?.headers;
+  const extraPayload = {
+    ...(cookies ? { cookies } : {}),
+    ...(headers ? { headers } : {}),
+  };
   if (mediaIds.length <= 250) {
     return request<DownloadJob[]>("/downloads", {
       method: "POST",
-      body: JSON.stringify({ analysis_id: analysisId, media_ids: mediaIds, subtitle_format: subtitleFormat }),
+      body: JSON.stringify({
+        analysis_id: analysisId,
+        media_ids: mediaIds,
+        subtitle_format: subtitleFormat,
+        ...extraPayload,
+      }),
     });
   }
   const chunks: string[][] = [];
@@ -97,7 +138,12 @@ export async function createDownloads(
     chunks.map((chunk) =>
       request<DownloadJob[]>("/downloads", {
         method: "POST",
-        body: JSON.stringify({ analysis_id: analysisId, media_ids: chunk, subtitle_format: subtitleFormat }),
+        body: JSON.stringify({
+          analysis_id: analysisId,
+          media_ids: chunk,
+          subtitle_format: subtitleFormat,
+          ...extraPayload,
+        }),
       }),
     ),
   );
