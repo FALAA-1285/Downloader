@@ -1,13 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { Download, Loader2, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
+import { CircleStop, Download, Loader2, Pause, Play, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
 import { formatBytes, formatRelative } from "@/lib/utils";
 import {
   canFetchFile,
+  cancelJob,
   isExpired,
   jobFileHref,
+  pauseJob,
   removeJob,
+  resumeJob,
   retryJob,
   saveJobFile,
   type StoredJob,
@@ -21,11 +24,14 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
   const [showError, setShowError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
   const expired = job.status === "completed" && isExpired(job, now);
   const href = jobFileHref(job);
-  // Job antre (`pending`) boleh dihapus; yang sedang diproses tidak.
+  // Job antre (`pending`) atau dijeda boleh dihapus; yang sedang diproses harus dijeda/dibatalkan dulu.
   const running = job.status === "processing" || job.status === "downloading";
   const active = running || job.status === "pending";
+  const paused = job.status === "paused";
+  const controllable = active || paused;
 
   const sizeLabel =
     job.status === "downloading"
@@ -34,10 +40,13 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
 
   async function run(action: () => Promise<unknown>) {
     setActionError(null);
+    setBusy(true);
     try {
       await action();
     } catch (err) {
       setActionError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -61,7 +70,7 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
         </div>
 
         <div className="col-span-2 col-start-2 row-start-2 sm:col-span-1 sm:col-start-auto sm:row-start-auto">
-          {!active && (
+          {!active && !paused && (
             <div className="mb-1 sm:hidden">
               {expired ? <StatusPill status="pending" label="Kedaluwarsa" /> : <StatusPill status={job.status} />}
             </div>
@@ -80,6 +89,17 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
                         : "Menyiapkan unduhan…"}
                 </span>
                 {job.status === "downloading" && job.progress != null && <span>{job.progress}%</span>}
+              </p>
+            </div>
+          ) : paused ? (
+            <div>
+              <Progress value={job.progress} />
+              <p className="mt-1.5 flex justify-between text-[12px] tabular-nums text-muted-foreground">
+                <span>
+                  Dijeda · {formatBytes(job.size_downloaded)}
+                  {job.size_total ? ` / ${formatBytes(job.size_total)}` : ""}
+                </span>
+                {job.progress != null && <span>{job.progress}%</span>}
               </p>
             </div>
           ) : (
@@ -123,6 +143,55 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
               Demo: tanpa file
             </span>
           )}
+          {active && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={busy}
+              onClick={() => run(() => pauseJob(job.id))}
+              aria-label={`Jeda ${job.filename}`}
+              title="Jeda"
+            >
+              <Pause className="size-3.5" />
+            </Button>
+          )}
+          {paused && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={busy}
+              onClick={() => run(() => resumeJob(job.id))}
+              aria-label={`Lanjutkan ${job.filename}`}
+              title="Lanjutkan"
+            >
+              <Play className="size-3.5" />
+            </Button>
+          )}
+          {controllable && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={busy}
+              onClick={() => run(() => cancelJob(job.id))}
+              className="text-muted-foreground hover:bg-bad-bg hover:text-bad"
+              aria-label={`Batalkan ${job.filename}`}
+              title="Batalkan"
+            >
+              <CircleStop className="size-3.5" />
+            </Button>
+          )}
+          {job.status === "cancelled" && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={busy}
+              onClick={() => run(() => retryJob(job.id))}
+              aria-label={`Mulai ulang ${job.filename}`}
+              title="Mulai ulang"
+            >
+              <RotateCcw className="size-3.5" />
+            </Button>
+          )}
           {job.status === "failed" && (
             <>
               <Button
@@ -162,7 +231,7 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
                 disabled={running}
                 className="text-muted-foreground hover:bg-bad-bg hover:text-bad"
                 aria-label={`Hapus ${job.filename}`}
-                title={running ? "Tunggu hingga pekerjaan selesai" : "Hapus pekerjaan"}
+                title={running ? "Jeda atau batalkan dulu sebelum menghapus" : "Hapus pekerjaan"}
               >
                 <Trash2 className="size-3.5" />
               </Button>

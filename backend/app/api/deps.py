@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.registry import AdapterRegistry
 from app.core.config import Settings
 from app.core.ratelimit import RateLimiter
+from app.models.db import SessionFactory
 from app.services.analysis_service import AnalysisService
 from app.workers.queue import DownloadQueue
 
@@ -16,6 +17,10 @@ from app.workers.queue import DownloadQueue
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     async with request.app.state.sessions() as session:
         yield session
+
+
+def get_session_factory(request: Request) -> SessionFactory:
+    return request.app.state.sessions
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -45,6 +50,7 @@ def rate_limit(bucket: str, setting: str):
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+SessionFactoryDep = Annotated[SessionFactory, Depends(get_session_factory)]
 SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 QueueDep = Annotated[DownloadQueue, Depends(get_queue)]
 RegistryDep = Annotated[AdapterRegistry, Depends(get_registry)]

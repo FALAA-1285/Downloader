@@ -1,160 +1,254 @@
-document.addEventListener("DOMContentLoaded", async () => {
-  const tabTitle = document.getElementById("tabTitle");
-  const tabUrl = document.getElementById("tabUrl");
-  const mediaCount = document.getElementById("mediaCount");
-  const mediaList = document.getElementById("mediaList");
-  const btnAnalyzePage = document.getElementById("btnAnalyzePage");
-  const btnCopyCookies = document.getElementById("btnCopyCookies");
-  const statusText = document.getElementById("statusText");
+// Popup — Universal Media Downloader Helper.
+// Semua teks dari halaman (URL, judul) dirender dengan textContent, bukan innerHTML (M-08).
 
-  function setStatus(msg) {
-    statusText.textContent = msg;
-    setTimeout(() => {
-      statusText.textContent = "Siap";
-    }, 3500);
+const DEFAULT_BASE = "http://localhost:3000";
+const ALL_URLS = { origins: ["<all_urls>"] };
+
+// Platform yang diunduh langsung oleh backend lewat yt-dlp (sama dengan adapter di backend).
+// Situs ini memutar video lewat MediaSource dalam potongan-potongan, jadi tidak ada satu tautan
+// stream yang bisa ditangkap — dan memang tidak perlu: cukup kirim URL halamannya.
+const PLATFORMS = {
+  "youtube.com": "YouTube",
+  "youtu.be": "YouTube",
+  "youtube-nocookie.com": "YouTube",
+  "instagram.com": "Instagram",
+  "facebook.com": "Facebook",
+  "fb.watch": "Facebook",
+  "tiktok.com": "TikTok",
+  "x.com": "X",
+  "twitter.com": "X",
+  "threads.net": "Threads",
+  "reddit.com": "Reddit",
+  "pinterest.com": "Pinterest",
+  "vimeo.com": "Vimeo",
+  "twitch.tv": "Twitch",
+  "dailymotion.com": "Dailymotion",
+  "soundcloud.com": "SoundCloud",
+};
+
+function platformOf(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    const match = Object.keys(PLATFORMS).find((d) => host === d || host.endsWith(`.${d}`));
+    return match ? PLATFORMS[match] : null;
+  } catch {
+    return null;
+  }
+}
+
+let currentPlatform = null;
+
+const $ = (id) => document.getElementById(id);
+
+let statusTimer = null;
+function setStatus(msg) {
+  const node = $("statusText");
+  node.textContent = msg;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => {
+    node.textContent = "Siap";
+  }, 3500);
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+async function getUiBase() {
+  const { uiBase } = await chrome.storage.local.get("uiBase");
+  return uiBase || DEFAULT_BASE;
+}
+
+function normalizeBase(value) {
+  try {
+    const u = new URL(value.trim());
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function openAnalyze(url) {
+  const base = await getUiBase();
+  chrome.tabs.create({ url: `${base}/analyze?url=${encodeURIComponent(url)}` });
+}
+
+/** Cookie tab dalam format Netscape cookies.txt (domain, path, secure, HttpOnly, kedaluwarsa). */
+function toNetscape(cookies) {
+  const lines = ["# Netscape HTTP Cookie File"];
+  for (const c of cookies) {
+    const domain = c.hostOnly ? c.domain : `.${c.domain.replace(/^\./, "")}`;
+    lines.push(
+      [
+        `${c.httpOnly ? "#HttpOnly_" : ""}${domain}`,
+        c.hostOnly ? "FALSE" : "TRUE",
+        c.path || "/",
+        c.secure ? "TRUE" : "FALSE",
+        String(Math.floor(c.expirationDate || 0)),
+        c.name,
+        c.value,
+      ].join("\t"),
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+function renderItems(items) {
+  const list = $("mediaList");
+  $("mediaCount").textContent = String(items.length);
+  list.replaceChildren();
+
+  if (items.length === 0) {
+    const empty = el("div", "empty-state");
+    if (currentPlatform) {
+      empty.append(
+        el("p", null, `${currentPlatform} didukung langsung — tidak perlu menangkap stream.`),
+        el(
+          "small",
+          null,
+          `${currentPlatform} memutar video dalam potongan-potongan terpisah, bukan satu tautan. ` +
+            "Tekan “Buka di Web UI”: server akan mengambil video & audio kualitas terbaik secara utuh.",
+        ),
+      );
+    } else {
+      empty.append(
+        el("p", null, "Belum ada stream terdeteksi."),
+        el("small", null, "Putar video di tab ini (klik play), lalu buka kembali popup ini."),
+      );
+    }
+    list.append(empty);
+    return;
   }
 
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab) return;
-
-  tabTitle.textContent = activeTab.title || "Tab aktif";
-  tabUrl.textContent = activeTab.url || "—";
-
-  btnAnalyzePage.addEventListener("click", () => {
-    const webUrl = `http://localhost:3000/analyze?url=${encodeURIComponent(activeTab.url)}`;
-    chrome.tabs.create({ url: webUrl });
-  });
-
-  btnCopyCookies.addEventListener("click", () => {
-    chrome.runtime.sendMessage({ action: "getTabCookies", url: activeTab.url }, (res) => {
-      if (res && res.cookies) {
-        navigator.clipboard.writeText(res.cookies).then(() => {
-          setStatus("✓ Cookie berhasil disalin! Tempel di Settings UMD.");
-        });
-      } else {
-        setStatus("Tidak ada cookie untuk domain ini");
-      }
+  for (const item of items) {
+    const row = el("div", "media-item");
+    const header = el("div", "media-header");
+    header.append(el("span", "media-tag", item.type));
+    const urlEl = el("div", "media-url", item.url);
+    urlEl.title = item.url;
+    const actions = el("div", "media-actions");
+    const copy = el("button", "btn-small btn-copy", "Salin URL");
+    copy.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(item.url);
+      setStatus("✓ URL stream disalin");
     });
+    const send = el("button", "btn-small btn-download", "Unduh via UMD");
+    send.addEventListener("click", () => openAnalyze(item.url));
+    actions.append(copy, send);
+    row.append(header, urlEl, actions);
+    list.append(row);
+  }
+}
+
+function fetchStoredMedia(tabId) {
+  chrome.runtime.sendMessage({ action: "getCapturedMedia", tabId }, (response) => {
+    renderItems((response && response.media) || []);
+  });
+}
+
+async function scanTab(tab) {
+  // Pindai elemen media & riwayat Resource Timing tab (izin activeTab, tanpa akses host permanen).
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: () => {
+        const found = new Set();
+        try {
+          for (const e of performance.getEntriesByType("resource")) found.add(e.name);
+        } catch {
+          // Resource Timing tidak tersedia di frame ini.
+        }
+        document.querySelectorAll("video, audio, source, track").forEach((m) => {
+          if (m.currentSrc) found.add(m.currentSrc);
+          if (m.src) found.add(m.src);
+        });
+        return [...found].filter((u) => /^https?:/i.test(u));
+      },
+    });
+    const urls = new Set();
+    for (const frame of results || []) for (const u of frame.result || []) urls.add(u);
+    if (urls.size) {
+      chrome.runtime.sendMessage({ action: "addMediaDirect", tabId: tab.id, urls: [...urls] }, () =>
+        fetchStoredMedia(tab.id),
+      );
+    }
+  } catch (e) {
+    console.debug("Pemindaian tab dilewati (halaman dibatasi):", e);
+  }
+}
+
+async function refreshPermissionUi() {
+  const granted = await chrome.permissions.contains(ALL_URLS);
+  $("permissionBox").hidden = granted;
+  $("btnRevoke").hidden = !granted;
+  return granted;
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const base = await getUiBase();
+  $("webLink").href = base;
+  $("uiBase").value = base;
+  await refreshPermissionUi();
+  if (!tab) return;
+
+  $("tabTitle").textContent = tab.title || "Tab aktif";
+  $("tabUrl").textContent = tab.url || "—";
+  currentPlatform = tab.url ? platformOf(tab.url) : null;
+  if (currentPlatform) $("btnAnalyzePage").textContent = `Unduh dari ${currentPlatform} via Web UI`;
+
+  $("btnAnalyzePage").addEventListener("click", () => tab.url && openAnalyze(tab.url));
+
+  $("btnGrant").addEventListener("click", async () => {
+    const ok = await chrome.permissions.request(ALL_URLS);
+    await refreshPermissionUi();
+    setStatus(ok ? "✓ Diizinkan. Muat ulang tab lalu putar videonya." : "Izin tidak diberikan.");
   });
 
-  function renderItems(items) {
-    mediaCount.textContent = String(items.length);
+  $("btnRevoke").addEventListener("click", async () => {
+    await chrome.permissions.remove(ALL_URLS);
+    await refreshPermissionUi();
+    setStatus("Izin penangkapan jaringan dicabut.");
+  });
 
-    if (items.length === 0) {
-      mediaList.innerHTML = `
-        <div class="empty-state">
-          <p>Belum ada stream terdeteksi.</p>
-          <small>Coba putar video di halaman (klik play), lalu buka kembali popup ini.</small>
-        </div>
-      `;
+  $("btnSaveBase").addEventListener("click", async () => {
+    const value = normalizeBase($("uiBase").value);
+    if (!value) {
+      setStatus("Alamat tidak valid. Contoh: http://localhost:3000");
       return;
     }
+    await chrome.storage.local.set({ uiBase: value });
+    $("webLink").href = value;
+    $("uiBase").value = value;
+    setStatus("✓ Alamat Web UI disimpan");
+  });
 
-    mediaList.innerHTML = "";
-    items.forEach((item) => {
-      const el = document.createElement("div");
-      el.className = "media-item";
-      el.innerHTML = `
-        <div class="media-header">
-          <span class="media-tag">${item.type}</span>
-        </div>
-        <div class="media-url" title="${item.url}">${item.url}</div>
-        <div class="media-actions">
-          <button class="btn-small btn-copy">Salin URL</button>
-          <button class="btn-small btn-download">Unduh via UMD</button>
-        </div>
-      `;
-
-      el.querySelector(".btn-copy").addEventListener("click", () => {
-        navigator.clipboard.writeText(item.url).then(() => {
-          setStatus("✓ URL stream disalin!");
-        });
-      });
-
-      el.querySelector(".btn-download").addEventListener("click", () => {
-        const webUrl = `http://localhost:3000/analyze?url=${encodeURIComponent(item.url)}`;
-        chrome.tabs.create({ url: webUrl });
-      });
-
-      mediaList.appendChild(el);
-    });
-  }
-
-  function fetchStoredMedia() {
-    chrome.runtime.sendMessage({ action: "getCapturedMedia", tabId: activeTab.id }, (response) => {
-      const items = (response && response.media) || [];
-      renderItems(items);
-    });
-  }
-
-  // 1. Tampilkan media yang sudah tersimpan di background service worker
-  fetchStoredMedia();
-
-  // 2. Pindai DOM dan Resource Timing tab aktif secara langsung
-  if (activeTab.id && activeTab.url && !activeTab.url.startsWith("chrome://")) {
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id, allFrames: true },
-        func: () => {
-          const found = [];
-          const STREAM_PATTERN = /((\.m3u8|\.mpd|\.mp4|\.webm|\.mkv|\.mov|\.vtt|\.srt|\.ts|\.m4s)(\?|$|#)|(\/hls\/|\/manifest|\/playlist|master\.m3u8))/i;
-
-          // Riwayat request jaringan yang sudah dipanggil oleh tab ini sejak awal dimuat
-          try {
-            const entries = performance.getEntriesByType("resource");
-            for (const e of entries) {
-              if (e.name && STREAM_PATTERN.test(e.name)) {
-                found.push(e.name);
-              }
-            }
-          } catch {}
-
-          // Elemen video/audio/iframe di dalam DOM tab
-          try {
-            document.querySelectorAll("video, audio").forEach((v) => {
-              if (v.currentSrc) found.push(v.currentSrc);
-              if (v.src) found.push(v.src);
-            });
-            document.querySelectorAll("source").forEach((s) => {
-              if (s.src) found.push(s.src);
-            });
-            document.querySelectorAll("iframe").forEach((f) => {
-              const src = f.src || f.getAttribute("data-src") || "";
-              if (src && (STREAM_PATTERN.test(src) || src.includes("embed") || src.includes("player") || src.includes("videonode") || src.includes("cloudemb"))) {
-                found.push(src);
-              }
-            });
-            document.querySelectorAll("track").forEach((t) => {
-              if (t.src) found.push(t.src);
-            });
-          } catch {}
-
-          return found.filter((u) => u && !u.startsWith("blob:") && !u.startsWith("data:"));
-        },
-      });
-
-      if (results && results.length > 0) {
-        const directUrls = new Set();
-        results.forEach((frame) => {
-          if (frame.result && Array.isArray(frame.result)) {
-            frame.result.forEach((u) => directUrls.add(u));
-          }
-        });
-
-        // Daftarkan ke background
-        for (const u of directUrls) {
-          chrome.runtime.sendMessage({
-            action: "addMediaDirect",
-            tabId: activeTab.id,
-            url: u,
-          });
-        }
-
-        // Segarkan tampilan daftar media di popup
-        setTimeout(fetchStoredMedia, 300);
-      }
-    } catch (e) {
-      console.debug("Script injection bypassed on restricted tab:", e);
+  $("btnCopyCookies").addEventListener("click", async () => {
+    if (!tab.url || !/^https?:/i.test(tab.url)) {
+      setStatus("Tab ini tidak memiliki cookie situs.");
+      return;
     }
-  }
+    // Akses cookie diminta hanya untuk situs tab ini, saat tombol ditekan.
+    const origin = `${new URL(tab.url).origin}/*`;
+    const ok = await chrome.permissions.request({ origins: [origin] });
+    if (!ok) {
+      setStatus("Izin membaca cookie situs ini tidak diberikan.");
+      return;
+    }
+    const cookies = await chrome.cookies.getAll({ url: tab.url });
+    if (!cookies.length) {
+      setStatus("Tidak ada cookie untuk situs ini.");
+      return;
+    }
+    await navigator.clipboard.writeText(toNetscape(cookies));
+    setStatus(`✓ ${cookies.length} cookie disalin. Tempel di Settings UMD.`);
+  });
+
+  renderItems([]);
+  fetchStoredMedia(tab.id);
+  if (tab.id && tab.url && /^https?:/i.test(tab.url)) await scanTab(tab);
 });

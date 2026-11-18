@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.core.errors import AppError
@@ -81,12 +83,15 @@ def test_invalid_subtitle_rejected():
     assert validate_subtitle(SRT, "srt")
 
 
-def test_download_ytdlp_sync_handles_max_downloads_reached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_download_ytdlp_sync_picks_final_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import time
     import uuid
     from unittest.mock import MagicMock
+
     import yt_dlp
-    import yt_dlp.utils
-    from app.services.download_runner import _download_ytdlp_sync
+
+    from app.core.config import Settings
+    from app.services.download_runner import _Control, _download_ytdlp_sync
 
     job_id = uuid.uuid4()
     part_path = tmp_path / f"{job_id.hex}.part"
@@ -98,21 +103,42 @@ def test_download_ytdlp_sync_handles_max_downloads_reached(tmp_path: Path, monke
     ytdl_file.write_bytes(b"temp_ytdl_metadata")
     frag_file = tmp_path / f"{job_id.hex}_ytdlp.mp4.part-Frag1"
     frag_file.write_bytes(b"temp_frag")
+    # File per-format sisa merge tidak boleh terpilih walau lebih besar (M-04).
+    fmt_file = tmp_path / f"{job_id.hex}_ytdlp.f137.mp4"
+    fmt_file.write_bytes(MP4 * 50)
 
-    def mock_download(self, urls):
-        raise yt_dlp.utils.MaxDownloadsReached()
+    seen_opts: dict = {}
 
-    monkeypatch.setattr(yt_dlp.YoutubeDL, "download", mock_download)
+    def fake_extract(self, url, download=False):
+        seen_opts.update(self.params)
+        return {"duration": 30}
+
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "extract_info", fake_extract)
+    monkeypatch.setattr(
+        yt_dlp.YoutubeDL,
+        "process_ie_result",
+        lambda self, info, download=True: {"requested_downloads": [{"filepath": str(target_file)}]},
+    )
+    control = _Control(deadline=time.monotonic() + 60, max_bytes=10_000_000, loop=MagicMock())
 
     head, size = _download_ytdlp_sync(
         "https://example.com/video",
         "video",
         part_path,
-        {},
+        {"cookies": "sid=abc"},
         job_id,
         MagicMock(),
-        MagicMock(),
+        Settings(_env_file=None, storage_path=tmp_path),
+        "http://127.0.0.1:1",
+        "https://example.com/page",
+        control,
     )
+
+    # Semua koneksi lewat proxy penjaga (C-01); cookie lewat cookiefile, bukan header global (C-03).
+    assert seen_opts["proxy"] == "http://127.0.0.1:1"
+    assert "Cookie" not in seen_opts["http_headers"]
+    assert seen_opts["cookiefile"].endswith(".txt")
+    assert not list((tmp_path / "temp").glob("cookies-*"))  # cookiefile sementara dihapus
 
     assert head.startswith(b"\x00\x00\x00\x18ftypmp42")
     assert size == len(MP4)
@@ -120,4 +146,38 @@ def test_download_ytdlp_sync_handles_max_downloads_reached(tmp_path: Path, monke
     assert not target_file.exists()
     assert not ytdl_file.exists()
     assert not frag_file.exists()
+    assert not fmt_file.exists()
 
+
+def test_download_ytdlp_sync_rejects_long_duration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Batas durasi berlaku juga untuk stream generik, bukan hanya adapter sosial (H-03)."""
+    import time
+    import uuid
+    from unittest.mock import MagicMock
+
+    import yt_dlp
+
+    from app.core.config import Settings
+    from app.core.errors import AppError
+    from app.services.download_runner import _Control, _download_ytdlp_sync
+
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "extract_info", lambda self, url, download=False: {"duration": 99_999})
+    called = MagicMock()
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "process_ie_result", called)
+    control = _Control(deadline=time.monotonic() + 60, max_bytes=10_000_000, loop=MagicMock())
+    job_id = uuid.uuid4()
+    with pytest.raises(AppError) as exc:
+        _download_ytdlp_sync(
+            "https://example.com/v.m3u8",
+            "video",
+            tmp_path / f"{job_id.hex}.part",
+            {},
+            job_id,
+            MagicMock(),
+            Settings(_env_file=None, storage_path=tmp_path),
+            "http://127.0.0.1:1",
+            None,
+            control,
+        )
+    assert exc.value.code == "duration_limit_exceeded"
+    called.assert_not_called()

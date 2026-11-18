@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from app.extractors.ytdlp_support import is_ytdlp_supported
+
 from .base import Adapter
 from .generic import GenericAdapter
-from .platforms.social import SOCIAL_ADAPTERS, UniversalPlatformAdapter, is_ytdlp_supported
+from .platforms.social import SOCIAL_ADAPTERS, UniversalPlatformAdapter
 
 
 class AdapterRegistry:
@@ -25,7 +27,9 @@ class AdapterRegistry:
         if url:
             supported, _ = is_ytdlp_supported(url)
             if supported:
-                return next((a for a in self.platforms if isinstance(a, UniversalPlatformAdapter)), UniversalPlatformAdapter())
+                return next(
+                    (a for a in self.platforms if isinstance(a, UniversalPlatformAdapter)), UniversalPlatformAdapter()
+                )
         return self.generic
 
     def status_of(self, adapter: Adapter) -> str:

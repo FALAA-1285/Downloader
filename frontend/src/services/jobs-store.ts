@@ -1,7 +1,8 @@
 "use client";
 
 // Store pekerjaan unduhan di sisi klien.
-// - Mode backend: membuat job lewat POST /downloads lalu polling GET /downloads/{id}.
+// - Mode backend: membuat job lewat POST /downloads lalu polling semua job aktif sekaligus
+//   lewat POST /downloads/status (satu request, berapa pun jumlah job aktif).
 // - Mode demo: mensimulasikan transisi status agar alur UI bisa dicoba tanpa backend.
 // - Kegagalan sinkronisasi dengan backend disimpan sebagai `syncError` agar UI bisa menampilkannya.
 
@@ -10,12 +11,16 @@ import { ApiError, type AnalyzeResult, type DownloadJob, type MediaItem, type Su
 import {
   FILE_LINKS_NEED_FETCH,
   IS_DEMO,
+  type BatchZip,
+  cancelDownload,
   createDownloads,
   deleteHistory,
   downloadZipFile,
   fileUrl,
-  getDownload,
+  getDownloads,
   getHistory,
+  pauseDownload,
+  resumeDownload,
   retryDownload,
   saveFileWithToken,
 } from "./api";
@@ -42,7 +47,11 @@ let isDrainingQueue = false;
 
 /** Pekerjaan yang hanya ada di browser (mis. ekspor TXT), bukan di server. */
 const isLocal = (j: { id: string }) => j.id.startsWith("job-");
-const isActive = (j: DownloadJob) => j.status === "pending" || j.status === "processing" || j.status === "downloading";
+/** Job yang masih dikerjakan server (dipantau lewat polling). Job `paused` tidak dipolling. */
+export const isActive = (j: Pick<DownloadJob, "status">) =>
+  j.status === "pending" || j.status === "processing" || j.status === "downloading";
+/** Job yang bisa dijeda/dibatalkan. */
+export const isRunning = (j: Pick<DownloadJob, "status">) => j.status === "processing" || j.status === "downloading";
 
 export function triggerBrowserDownload(j: StoredJob) {
   if (typeof window === "undefined") return;
@@ -201,22 +210,23 @@ async function tickRemote() {
       setSyncError(null);
       return;
     }
-    const updates = await Promise.allSettled(active.map((j) => getDownload(j.id)));
     const byId = new Map<string, Partial<StoredJob>>();
     let networkError: string | null = null;
-    updates.forEach((u, i) => {
-      if (u.status === "fulfilled") {
-        byId.set(u.value.id, u.value);
-      } else if (u.reason instanceof ApiError && u.reason.status === 404) {
-        // Job sudah tidak ada di server: hentikan polling untuk job ini.
-        byId.set(active[i].id, {
-          status: "failed",
-          error_message: "Pekerjaan tidak ditemukan di server (mungkin sudah dihapus atau database direset).",
-        });
-      } else {
-        networkError = (u.reason as Error)?.message ?? "Backend tidak dapat dihubungi.";
-      }
-    });
+    try {
+      const remote = await getDownloads(active.map((j) => j.id));
+      remote.forEach((r) => byId.set(r.id, r));
+      // Job yang tidak dikembalikan server sudah tidak ada: hentikan polling untuk job itu.
+      active
+        .filter((j) => !byId.has(j.id))
+        .forEach((j) =>
+          byId.set(j.id, {
+            status: "failed",
+            error_message: "Pekerjaan tidak ditemukan di server (mungkin sudah dihapus atau database direset).",
+          }),
+        );
+    } catch (err) {
+      networkError = (err as Error)?.message ?? "Backend tidak dapat dihubungi.";
+    }
     if (byId.size > 0) {
       consecutiveFailures = 0;
       setSyncError(null);
@@ -282,6 +292,8 @@ export async function startDownloads(
       result.id,
       items.map((i) => i.id),
       subtitleFormat,
+      undefined,
+      result.page.url,
     );
     // Jika <= 3 item, otomatis unduh ke browser saat selesai.
     // Jika lebih banyak (batch), biarkan tersimpan di server tanpa spamming puluhan dialog Save browser.
@@ -367,6 +379,39 @@ export async function retryJob(id: string) {
   );
 }
 
+function patchLocal(id: string, patch: Partial<StoredJob>) {
+  set(jobs.map((j) => (j.id === id ? { ...j, ...patch } : j)));
+}
+
+export async function pauseJob(id: string) {
+  if (!IS_DEMO && !isLocal({ id })) {
+    patchLocal(id, await pauseDownload(id));
+    return;
+  }
+  patchLocal(id, { status: "paused" });
+}
+
+export async function resumeJob(id: string) {
+  if (!IS_DEMO && !isLocal({ id })) {
+    patchLocal(id, await resumeDownload(id));
+    return;
+  }
+  patchLocal(id, { status: "pending", _t: Date.now() });
+}
+
+export async function cancelJob(id: string) {
+  autoSaveIds.delete(id);
+  if (!IS_DEMO && !isLocal({ id })) {
+    patchLocal(id, await cancelDownload(id));
+    return;
+  }
+  patchLocal(id, {
+    status: "cancelled",
+    error_message: "Dibatalkan oleh pengguna.",
+    completed_at: new Date().toISOString(),
+  });
+}
+
 export async function removeJob(id: string) {
   if (!IS_DEMO && !isLocal({ id })) await deleteHistory(id);
   set(jobs.filter((j) => j.id !== id));
@@ -422,6 +467,6 @@ export function saveJobFile(j: StoredJob): Promise<void> {
   return saveFileWithToken(j.id, j.filename);
 }
 
-export async function downloadBatchAsZip(jobIds: string[], zipName = "media_downloads"): Promise<void> {
-  await downloadZipFile(jobIds, zipName);
+export function downloadBatchAsZip(jobIds: string[], zipName = "media_downloads"): Promise<BatchZip> {
+  return downloadZipFile(jobIds, zipName);
 }

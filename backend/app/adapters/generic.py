@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from urllib.parse import urlsplit
 
+from app.core.cookies import parse_cookies
 from app.core.errors import AppError
 from app.core.http_client import open_stream, read_limited, status_error
 from app.extractors.common import (
@@ -27,6 +29,7 @@ from app.extractors.text import extract_text, word_count
 from .base import Adapter, AnalysisContext, AnalysisOutcome
 
 HTML_TYPES = ("text/html", "application/xhtml+xml")
+log = logging.getLogger(__name__)
 
 
 def _direct_type(mime: str, ext: str | None) -> str | None:
@@ -59,9 +62,9 @@ class GenericAdapter(Adapter):
         headers = {"Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"}
         if ctx.headers:
             headers.update(ctx.headers)
-        if ctx.cookies:
-            headers["Cookie"] = ctx.cookies
-        async with open_stream(ctx.client, ctx.url, settings, headers=headers) as (resp, final_url):
+        # Cookie diubah ke daftar terikat domain; open_stream hanya mengirim yang cocok per hop.
+        jar = parse_cookies(ctx.cookies, ctx.url)
+        async with open_stream(ctx.client, ctx.url, settings, headers=headers, cookies=jar) as (resp, final_url):
             if resp.status_code >= 400:
                 raise status_error(resp.status_code)
             mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -97,7 +100,6 @@ class GenericAdapter(Adapter):
             page.soup.find(id=re.compile(r"^(root|app|__next|__nuxt)$"))
             or "self.__next_f" in page.html
             or needs_javascript(page, words)
-            or any(s in final_url.lower() for s in ("idlix", "lk21", "layarkaca"))
         )
 
         if settings.enable_dynamic_rendering and is_streaming_spa and (not has_video or not has_subtitle):
@@ -129,8 +131,9 @@ class GenericAdapter(Adapter):
                             media.append(c)
                             existing_urls.add(c.url)
                     warnings.extend(r_warn)
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"Dynamic renderer tidak dapat dijalankan: {exc}")
+            except Exception:  # noqa: BLE001 - render dinamis bersifat tambahan
+                log.warning("renderer dinamis gagal untuk %s", final_url, exc_info=True)
+                warnings.append("Renderer dinamis tidak dapat dijalankan; hanya HTML statis yang dianalisis.")
 
             has_video = any(m.type == "video" for m in media)
             has_subtitle = any(m.type == "subtitle" for m in media)
@@ -139,7 +142,7 @@ class GenericAdapter(Adapter):
             warnings.append(f"Ditemukan {len(media)} media; hanya {settings.max_media_items} pertama yang ditampilkan.")
             media = media[: settings.max_media_items]
 
-        warnings.extend(await probe_candidates(ctx.client, media, settings, referer=final_url))
+        warnings.extend(await probe_candidates(ctx.client, media, settings, referer=final_url, cookies=jar))
 
         if ctx.wants("text") and not text:
             warnings.append("Teks utama tidak terdeteksi pada halaman ini.")
@@ -151,11 +154,10 @@ class GenericAdapter(Adapter):
                 "Untuk mengunduh video, buka judul film yang diinginkan lalu salin URL halaman film spesifik tersebut."
             )
 
-        if is_streaming_spa and (not has_video or not has_subtitle):
+        if is_streaming_spa and ctx.wants("video") and not has_video:
             warnings.append(
-                "Situs ini memuat pemutar video/subtitle secara terenkripsi via JavaScript sisi klien (SPA/Next.js). "
-                "Jika video film penuh atau subtitle tidak muncul, putar film di browser lalu salin tautan direct stream (.m3u8) "
-                "atau subtitle (.vtt) langsung dari tab Network pada Developer Tools (F12)."
+                "Halaman ini memuat kontennya lewat JavaScript; sebagian media mungkin tidak terdeteksi. "
+                "Konten yang dilindungi DRM atau enkripsi pemutar tidak didukung."
             )
 
         return AnalysisOutcome(

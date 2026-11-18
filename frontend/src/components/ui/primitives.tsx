@@ -52,8 +52,10 @@ const STATUS_STYLE: Record<JobStatus, string> = {
   pending: "bg-idle-bg text-idle",
   processing: "bg-run-bg text-run",
   downloading: "bg-run-bg text-run",
+  paused: "bg-idle-bg text-idle",
   completed: "bg-ok-bg text-ok",
   failed: "bg-bad-bg text-bad",
+  cancelled: "bg-idle-bg text-muted-foreground",
 };
 
 export function StatusPill({ status, label }: { status: JobStatus; label?: string }) {

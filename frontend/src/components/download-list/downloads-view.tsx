@@ -13,7 +13,8 @@ import { JobRow } from "./job-row";
 import { SyncErrorAlert } from "./sync-error";
 
 type Filter = "all" | "active" | "completed" | "failed";
-const ACTIVE: JobStatus[] = ["pending", "processing", "downloading"];
+// Tab "Berjalan" juga menampilkan unduhan yang dijeda agar mudah dilanjutkan.
+const ACTIVE: JobStatus[] = ["pending", "processing", "downloading", "paused"];
 
 const FILTERS: Array<{ id: Filter; label: string }> = [
   { id: "all", label: "Semua" },
@@ -36,7 +37,9 @@ export function DownloadsView() {
     f === "all" ? true : f === "active" ? ACTIVE.includes(status) : status === f;
   const count = (f: Filter) => jobs.filter((j) => matches(f, j.status)).length;
   const shown = jobs.filter((j) => matches(filter, j.status));
-  const finished = jobs.filter((j) => j.status === "completed" || j.status === "failed").map((j) => j.id);
+  const finished = jobs
+    .filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled")
+    .map((j) => j.id);
   const completed = jobs.filter((j) => j.status === "completed" && !isExpired(j, now)).map((j) => j.id);
 
   return (

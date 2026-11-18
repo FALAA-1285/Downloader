@@ -11,6 +11,7 @@ import {
   type ServerConfig,
   type SubtitleFormat,
 } from "@/types";
+import { cookiesForUrl } from "@/lib/cookie-store";
 import { MOCK_ADAPTERS, MOCK_CONFIG, mockAnalyze } from "./mock";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "";
@@ -61,20 +62,6 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 15_0
   }
 }
 
-export function getStoredCookies(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("umd_session_cookies") || null;
-}
-
-export function setStoredCookies(cookies: string | null) {
-  if (typeof window === "undefined") return;
-  if (cookies && cookies.trim()) {
-    localStorage.setItem("umd_session_cookies", cookies.trim());
-  } else {
-    localStorage.removeItem("umd_session_cookies");
-  }
-}
-
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function analyzeUrl(
@@ -90,7 +77,8 @@ export async function analyzeUrl(
       throw new ApiError((e as Error).message, 422);
     }
   }
-  const cookies = authOptions?.cookies ?? getStoredCookies();
+  // Hanya cookie milik domain URL ini yang dikirim (C-03).
+  const cookies = authOptions?.cookies ?? cookiesForUrl(url);
   const headers = authOptions?.headers;
   return request<AnalyzeResult>(
     "/analyze",
@@ -112,8 +100,9 @@ export async function createDownloads(
   mediaIds: string[],
   subtitleFormat: SubtitleFormat = "original",
   authOptions?: RequestAuthOptions,
+  sourceUrl?: string,
 ): Promise<DownloadJob[]> {
-  const cookies = authOptions?.cookies ?? getStoredCookies();
+  const cookies = authOptions?.cookies ?? (sourceUrl ? cookiesForUrl(sourceUrl) : null);
   const headers = authOptions?.headers;
   const extraPayload = {
     ...(cookies ? { cookies } : {}),
@@ -158,6 +147,23 @@ export function getDownload(jobId: string) {
   return request<DownloadJob>(`/downloads/${encodeURIComponent(jobId)}`);
 }
 
+/** Status banyak job dalam satu request (polling progres). */
+export function getDownloads(jobIds: string[]) {
+  return request<DownloadJob[]>("/downloads/status", { method: "POST", body: JSON.stringify({ ids: jobIds }) });
+}
+
+export function pauseDownload(jobId: string) {
+  return request<DownloadJob>(`/downloads/${encodeURIComponent(jobId)}/pause`, { method: "POST" });
+}
+
+export function resumeDownload(jobId: string) {
+  return request<DownloadJob>(`/downloads/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
+}
+
+export function cancelDownload(jobId: string) {
+  return request<DownloadJob>(`/downloads/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+}
+
 export function getHistory() {
   return request<DownloadJob[]>("/history");
 }
@@ -193,28 +199,46 @@ export async function saveFileWithToken(jobId: string, filename: string): Promis
   setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 
-export async function downloadZipFile(jobIds: string[], zipName = "media_downloads"): Promise<void> {
-  const res = await fetch(`${API}/downloads/zip`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ job_ids: jobIds, zip_name: zipName }),
-    credentials: "omit",
-  });
-  if (!res.ok) {
-    let message = `Gagal mengemas file ZIP (HTTP ${res.status}).`;
-    try {
-      message = (await res.json()).detail?.message ?? message;
-    } catch {
-      // abaikan
-    }
-    throw new ApiError(message, res.status);
-  }
-  const href = URL.createObjectURL(await res.blob());
+export interface BatchZip {
+  id: string;
+  filename: string;
+  size: number;
+  file_count: number;
+  skipped: number;
+}
+
+function saveBlobHref(href: string, filename: string) {
   const a = document.createElement("a");
   a.href = href;
-  a.download = `${zipName}.zip`;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(href), 1000);
+  setTimeout(() => a.remove(), 150);
+}
+
+/**
+ * ZIP dua tahap (H-05): server membuat ZIP, lalu browser mengunduhnya lewat tautan biasa
+ * sehingga file disimpan langsung ke disk tanpa dimuat seluruhnya ke memori. Bila token API
+ * aktif, tautan tidak bisa membawa header — terpaksa lewat fetch + blob.
+ */
+export async function downloadZipFile(jobIds: string[], zipName = "media_downloads"): Promise<BatchZip> {
+  const meta = await request<BatchZip>(
+    "/downloads/zip",
+    { method: "POST", body: JSON.stringify({ job_ids: jobIds, zip_name: zipName }) },
+    120_000,
+  );
+  const href = `${API}/downloads/zip/${encodeURIComponent(meta.id)}?name=${encodeURIComponent(meta.filename)}`;
+  if (!TOKEN) {
+    saveBlobHref(href, meta.filename);
+    return meta;
+  }
+  const res = await fetch(href, { headers: authHeaders(), credentials: "omit" });
+  if (!res.ok) throw new ApiError(`Gagal mengambil file ZIP (HTTP ${res.status}).`, res.status);
+  const blobHref = URL.createObjectURL(await res.blob());
+  saveBlobHref(blobHref, meta.filename);
+  setTimeout(() => URL.revokeObjectURL(blobHref), 1000);
+  return meta;
 }
 
 export async function getAdapters(): Promise<AdapterInfo[]> {

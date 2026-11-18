@@ -6,7 +6,7 @@ import { ArrowRight, ChevronDown, ChevronUp, ClipboardPaste, KeyRound, Link2, Lo
 import type { MediaType } from "@/types";
 import { checkUrl } from "@/lib/url";
 import { cn } from "@/lib/utils";
-import { getStoredCookies, setStoredCookies } from "@/services/api";
+import { cookiesForUrl, normalizeDomain, saveCookieEntry, useCookieEntries } from "@/lib/cookie-store";
 import { Button } from "@/components/ui/button";
 import { TypeIcon } from "@/components/ui/primitives";
 
@@ -34,7 +34,11 @@ export function UrlForm({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [customCookies, setCustomCookies] = useState(() => getStoredCookies() || "");
+  const [customCookies, setCustomCookies] = useState("");
+  // Berlangganan perubahan cookie agar label "Aktif" ikut diperbarui.
+  useCookieEntries();
+  const targetDomain = normalizeDomain(checkUrl(url).ok ? url : null);
+  const hasSavedCookies = targetDomain ? cookiesForUrl(`https://${targetDomain}/`) !== null : false;
 
   function toggle(t: MediaType) {
     setTypes((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
@@ -49,7 +53,10 @@ export function UrlForm({
       return;
     }
     if (customCookies.trim()) {
-      setStoredCookies(customCookies.trim());
+      // Cookie hanya berlaku untuk domain URL ini (dan subdomainnya), bukan untuk semua situs.
+      const domain = normalizeDomain(res.url);
+      if (domain) saveCookieEntry(domain.replace(/^www\./, ""), customCookies);
+      setCustomCookies("");
     }
     setError(null);
     setSubmitting(true);
@@ -169,22 +176,26 @@ export function UrlForm({
         >
           <KeyRound className="size-3.5" aria-hidden />
           <span>Opsi Sesi / Cookie Login</span>
-          {customCookies ? <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand">Aktif</span> : null}
+          {hasSavedCookies || customCookies ? (
+            <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand">Aktif</span>
+          ) : null}
           {showAdvanced ? <ChevronUp className="size-3" aria-hidden /> : <ChevronDown className="size-3" aria-hidden />}
         </button>
         {showAdvanced && (
           <div className="mt-2.5 w-full max-w-xl rounded-xl border border-line-strong bg-surface p-3 text-left">
             <label htmlFor="custom-cookies-input" className="block text-[12px] font-medium text-ink">
-              Cookie Sesi (Netscape cookies.txt atau key=value;)
+              Cookie sesi untuk {targetDomain ? <span className="font-mono">{targetDomain.replace(/^www\./, "")}</span> : "domain URL ini"}
             </label>
             <p className="mt-0.5 text-[11px] text-muted-foreground">
-              Dibutuhkan untuk situs login, dibatasi usia, atau konten privat (YouTube member, Instagram, X, portal film).
+              Format Netscape cookies.txt, JSON, atau <span className="font-mono">nama=nilai;</span>. Cookie hanya dikirim
+              ke domain ini dan subdomainnya. {hasSavedCookies && "Cookie tersimpan untuk domain ini sudah aktif; isi baru akan menggantikannya."}{" "}
+              Kelola semua cookie di Settings.
             </p>
             <textarea
               id="custom-cookies-input"
               value={customCookies}
               onChange={(e) => setCustomCookies(e.target.value)}
-              placeholder="sessionid=xyz123; csrftoken=abc; atau tempel format Netscape cookies.txt"
+              placeholder="sessionid=xyz123; csrftoken=abc; atau tempel cookies.txt"
               rows={2}
               className="mt-2 w-full rounded-lg border border-line bg-bg p-2 font-mono text-[11px] text-ink outline-none placeholder:text-muted-foreground/60 focus:border-brand"
             />

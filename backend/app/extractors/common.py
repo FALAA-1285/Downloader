@@ -47,11 +47,6 @@ EXT_MIME = {
     "mpd": "application/dash+xml",
 }
 
-STREAM_REASON = (
-    "Streaming adaptif (HLS/DASH) belum didukung. Aplikasi tidak memproses manifest streaming "
-    "atau konten yang dilindungi DRM."
-)
-
 ID_PREFIX = {"image": "img", "video": "vid", "audio": "aud", "subtitle": "sub"}
 
 
@@ -67,6 +62,7 @@ class Candidate:
     height: int | None = None
     duration: float | None = None
     language: str | None = None
+    language_code: str | None = None
     label: str | None = None
     preview_url: str | None = None
     probe: bool = True
@@ -135,7 +131,11 @@ def filename_from_url(url: str, media_type: str, label: str | None = None) -> st
     generic_names = {"-", "index", "0.m3u8", "0", "player", "embed", "watch", "video", "play", "stream"}
     if not name or name.lower() in generic_names or (clean_label and "." not in name):
         if clean_label:
-            ext = ".mp4" if media_type == "video" else (".mp3" if media_type == "audio" else (".vtt" if media_type == "subtitle" else ""))
+            ext = (
+                ".mp4"
+                if media_type == "video"
+                else (".mp3" if media_type == "audio" else (".vtt" if media_type == "subtitle" else ""))
+            )
             name = clean_label if "." in clean_label else f"{clean_label}{ext}"
         else:
             name = media_type

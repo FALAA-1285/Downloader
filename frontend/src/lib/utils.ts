@@ -77,8 +77,10 @@ export const STATUS_LABEL: Record<JobStatus, string> = {
   pending: "Menunggu",
   processing: "Diproses",
   downloading: "Mengunduh",
+  paused: "Dijeda",
   completed: "Selesai",
   failed: "Gagal",
+  cancelled: "Dibatalkan",
 };
 
 export function extFromName(

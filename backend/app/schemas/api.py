@@ -6,10 +6,14 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, Field, StringConstraints
+
+from app.core.cookies import validate_custom_headers
 
 MediaType = Literal["image", "video", "audio", "subtitle", "text"]
-JobStatus = Literal["pending", "processing", "downloading", "completed", "failed"]
+JobStatus = Literal["pending", "processing", "downloading", "paused", "completed", "failed", "cancelled"]
+# Header kustom: allowlist nama, tanpa CR/LF, maksimal 20 (M-06).
+CustomHeaders = Annotated[dict[str, str] | None, AfterValidator(validate_custom_headers)]
 SourceType = Literal["generic", "youtube", "instagram", "facebook", "tiktok", "x", "social_other"] | str
 
 
@@ -17,7 +21,7 @@ class AnalyzeRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     media_types: list[MediaType] = Field(default_factory=list, max_length=5)
     cookies: str | None = Field(default=None, max_length=65536)
-    headers: dict[str, str] | None = None
+    headers: CustomHeaders = None
 
 
 class SourceInfo(BaseModel):
@@ -47,6 +51,8 @@ class MediaItem(BaseModel):
     height: int | None = None
     duration: float | None = None
     language: str | None = None
+    # Kode bahasa ISO 639-1 (mis. "id", "en") bila diketahui; `language` adalah nama tampilan.
+    language_code: str | None = None
     preview_url: str | None = None
     options: dict[str, Any] | None = None
 
@@ -89,12 +95,26 @@ class CreateDownloadsRequest(BaseModel):
     )
     subtitle_format: Literal["original", "srt"] = "original"
     cookies: str | None = Field(default=None, max_length=65536)
-    headers: dict[str, str] | None = None
+    headers: CustomHeaders = None
 
 
 class BatchZipRequest(BaseModel):
     job_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
-    zip_name: str | None = None
+    zip_name: str | None = Field(default=None, max_length=100)
+
+
+class BatchZipOut(BaseModel):
+    """ZIP dibuat di server; unduh lewat `GET /downloads/zip/{id}` (bisa langsung dari tautan biasa)."""
+
+    id: str
+    filename: str
+    size: int
+    file_count: int
+    skipped: int
+
+
+class JobStatusRequest(BaseModel):
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
 
 
 class DownloadJobOut(BaseModel):

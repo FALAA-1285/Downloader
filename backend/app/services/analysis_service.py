@@ -51,8 +51,11 @@ class AnalysisService:
     ) -> AnalyzeResponse:
         target = validate_url(raw_url, self.settings.port_allowlist)
         adapter = self.registry.resolve(target.domain, url=target.url)
-        if adapter is self.registry.generic and "generic" in self.registry.disabled:
-            raise AppError("adapter_disabled", "Analisis website umum sedang dinonaktifkan.", 503)
+        if adapter.id in self.registry.disabled:
+            # Berlaku untuk semua adapter, termasuk platform (M-07). Platform yang dinonaktifkan
+            # tidak dialihkan diam-diam ke Generic Adapter.
+            label = "website umum" if adapter is self.registry.generic else adapter.name
+            raise AppError("adapter_disabled", f"Analisis {label} sedang dinonaktifkan.", 503)
 
         async with self._semaphore, build_client(self.settings) as client:
             ctx = AnalysisContext(
@@ -106,6 +109,7 @@ class AnalysisService:
                     height=c.height,
                     duration=c.duration,
                     language=c.language,
+                    language_code=c.language_code,
                     preview_url=self._safe_preview(c.preview_url) if c.downloadable or c.type != "image" else None,
                     options=c.options,
                 )
@@ -116,11 +120,9 @@ class AnalysisService:
             analyzed_at=now,
         )
 
+        # Cookie & header pengguna TIDAK disimpan bersama hasil analisis (H-02); frontend
+        # mengirimkannya lagi saat membuat pekerjaan unduhan.
         dump = result.model_dump(mode="json")
-        if cookies:
-            dump["cookies"] = cookies
-        if headers:
-            dump["headers"] = headers
 
         session.add(
             Analysis(

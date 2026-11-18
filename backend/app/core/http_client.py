@@ -24,10 +24,13 @@ import httpcore
 import httpx
 
 from .config import Settings
+from .cookies import Cookie, cookie_header_for, same_host
 from .errors import AppError, TransientError, UnsafeURLError
 from .url_guard import resolve_public, validate_url
 
 REDIRECT_CODES = {301, 302, 303, 307, 308}
+# Header yang hanya boleh dikirim ke host asal; dibuang saat redirect pindah host (C-03).
+SENSITIVE_HEADERS = {"cookie", "authorization", "proxy-authorization"}
 BODY_CHUNK = 64 * 1024
 
 # Urutan penting: kelas spesifik sebelum kelas induk.
@@ -179,15 +182,32 @@ async def open_stream(
     *,
     method: str = "GET",
     headers: dict[str, str] | None = None,
+    cookies: list[Cookie] | None = None,
 ) -> AsyncIterator[tuple[httpx.Response, str]]:
     """Membuka response streaming dengan redirect yang divalidasi per hop.
+
+    - `cookies` dipasang per hop hanya bila domain/path/secure cocok dengan URL hop tersebut.
+    - Header sensitif dari pemanggil (`Cookie`, `Authorization`) hanya dikirim ke host awal;
+      begitu redirect berpindah host, header itu dibuang agar tidak bocor ke pihak lain.
 
     Menghasilkan (response, final_url). Response ditutup otomatis.
     """
     current = validate_url(url, settings.port_allowlist).url
+    origin = current
+    base_headers = dict(headers or {})
     for _hop in range(settings.max_redirects + 1):
+        hop_headers = (
+            dict(base_headers)
+            if same_host(current, origin)
+            else {k: v for k, v in base_headers.items() if k.lower() not in SENSITIVE_HEADERS}
+        )
+        if cookies:
+            cookie_value = cookie_header_for(current, cookies)
+            hop_headers = {k: v for k, v in hop_headers.items() if k.lower() != "cookie"}
+            if cookie_value:
+                hop_headers["Cookie"] = cookie_value
         try:
-            request = client.build_request(method, current, headers=headers)
+            request = client.build_request(method, current, headers=hop_headers)
         except httpx.InvalidURL as exc:
             raise UnsafeURLError("Format URL tidak valid.", code="url_malformed") from exc
         try:

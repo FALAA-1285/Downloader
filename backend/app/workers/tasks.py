@@ -7,12 +7,16 @@ import logging
 import uuid
 
 from app.core.config import get_settings
+from app.core.guard_proxy import shutdown_guard_proxy
+from app.core.url_guard import install_doh_socket_patch
 from app.models.db import make_engine, make_session_factory
 from app.services.download_runner import run_download
 
 
 def download_job(job_id: str) -> None:
     logging.basicConfig(level=get_settings().log_level)
+    # Perilaku DNS sama dengan proses API (M-11).
+    install_doh_socket_patch()
     asyncio.run(_main(uuid.UUID(job_id)))
 
 
@@ -23,4 +27,6 @@ async def _main(job_id: uuid.UUID) -> None:
     try:
         await run_download(job_id, make_session_factory(engine), settings)
     finally:
+        # Proxy penjaga SSRF terikat event loop job ini.
+        await shutdown_guard_proxy()
         await engine.dispose()

@@ -16,6 +16,7 @@ from app.core.errors import AppError
 from app.core.url_guard import redact_url, validate_url
 from app.extractors.common import sanitize_filename
 from app.models.models import Analysis, DownloadFile, DownloadHistory, DownloadJob, aware, utcnow
+from app.services.download_runner import remove_partials, strip_secrets
 
 # Status yang sedang dikerjakan worker. `pending` tidak termasuk: job antre boleh dihapus,
 # dan runner akan melewatinya karena klaim atomiknya gagal.
@@ -38,6 +39,7 @@ async def create_jobs(
         raise AppError("analysis_expired", "Hasil analisis sudah kedaluwarsa. Analisis ulang URL tersebut.", 404)
 
     items = {m["id"]: m for m in analysis.result.get("media", [])}
+    # Hasil analisis lama (sebelum H-02) mungkin masih memuat cookie; dipakai bila ada.
     saved_cookies = cookies or analysis.result.get("cookies")
     saved_headers = headers or analysis.result.get("headers")
     jobs: list[DownloadJob] = []
@@ -109,16 +111,63 @@ async def get_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
     return job
 
 
+async def get_jobs(session: AsyncSession, job_ids: list[uuid.UUID]) -> list[DownloadJob]:
+    """Status beberapa job sekaligus (satu request polling untuk semua unduhan aktif)."""
+    ids = list(dict.fromkeys(job_ids))
+    return list((await session.scalars(select(DownloadJob).where(DownloadJob.id.in_(ids)))).all())
+
+
 async def retry_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
     job = await get_job(session, job_id)
-    if job.status != "failed":
-        raise AppError("job_not_failed", "Hanya pekerjaan yang gagal yang dapat dicoba lagi.", 409)
+    if job.status not in ("failed", "cancelled"):
+        raise AppError("job_not_failed", "Hanya pekerjaan yang gagal atau dibatalkan yang dapat dicoba lagi.", 409)
     job.status = "pending"
     job.error_message = None
     job.size_downloaded = 0
     job.completed_at = None
     session.add(DownloadHistory(job_id=job.id, action="retried"))
     await session.commit()
+    return job
+
+
+async def pause_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
+    """Menjeda job antre/berjalan. Runner berhenti pada laporan progres berikutnya dan
+    menyimpan file parsial agar bisa dilanjutkan."""
+    job = await get_job(session, job_id)
+    if job.status not in ("pending", *RUNNING_STATUSES):
+        raise AppError("job_not_active", "Hanya unduhan yang sedang antre atau berjalan yang dapat dijeda.", 409)
+    job.status = "paused"
+    session.add(DownloadHistory(job_id=job.id, action="paused"))
+    await session.commit()
+    return job
+
+
+async def resume_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
+    job = await get_job(session, job_id)
+    if job.status != "paused":
+        raise AppError("job_not_paused", "Hanya unduhan yang dijeda yang dapat dilanjutkan.", 409)
+    job.status = "pending"
+    job.error_message = None
+    session.add(DownloadHistory(job_id=job.id, action="resumed"))
+    await session.commit()
+    return job
+
+
+async def cancel_job(session: AsyncSession, settings: Settings, job_id: uuid.UUID) -> DownloadJob:
+    """Membatalkan job. Bila sedang berjalan, runner berhenti pada laporan progres berikutnya
+    dan membersihkan file sementaranya; bila antre/dijeda, file parsial dihapus di sini."""
+    job = await get_job(session, job_id)
+    if job.status not in ("pending", "paused", *RUNNING_STATUSES):
+        raise AppError("job_not_active", "Unduhan ini sudah selesai atau berhenti.", 409)
+    was_running = job.status in RUNNING_STATUSES
+    job.status = "cancelled"
+    job.completed_at = utcnow()
+    job.error_message = "Dibatalkan oleh pengguna."
+    job.options = strip_secrets(job.options)
+    session.add(DownloadHistory(job_id=job.id, action="cancelled"))
+    await session.commit()
+    if not was_running:
+        await asyncio.to_thread(remove_partials, settings.temp_dir, job.id)
     return job
 
 
@@ -182,8 +231,9 @@ async def delete_job(session: AsyncSession, settings: Settings, job_id: uuid.UUI
     """Menghapus riwayat beserta file sementaranya dan log kejadiannya."""
     job = await get_job(session, job_id)
     if job.status in RUNNING_STATUSES:
-        raise AppError("job_active", "Pekerjaan masih berjalan. Tunggu hingga selesai sebelum menghapus.", 409)
+        raise AppError("job_active", "Pekerjaan masih berjalan. Jeda atau batalkan dulu sebelum menghapus.", 409)
     if job.file is not None:
         await remove_file_async(settings, job.file.storage_key)
+    await asyncio.to_thread(remove_partials, settings.temp_dir, job.id)
     await session.delete(job)
     await session.commit()

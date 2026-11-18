@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -20,7 +21,13 @@ from .common import (
     parse_int,
     url_ext,
 )
+from .ytdlp_support import is_ytdlp_supported
 
+log = logging.getLogger(__name__)
+
+# Host embed yang namanya ditampilkan rapi. Embed lain diterima hanya bila dikenali
+# extractor khusus yt-dlp (lihat `_embed_platform`), sehingga iframe iklan/widget yang URL-nya
+# kebetulan memuat kata "video"/"player" tidak lagi dianggap media yang bisa diunduh (M-03).
 EMBED_HOSTS = {
     "youtube.com": "YouTube",
     "youtube-nocookie.com": "YouTube",
@@ -30,63 +37,24 @@ EMBED_HOSTS = {
     "instagram.com": "Instagram",
 }
 
-STREAM_EMBED_KEYWORDS = (
-    "player",
-    "embed",
-    "video",
-    "stream",
-    "videonode",
-    "playcdn",
-    "fembed",
-    "streamtape",
-    "doodstream",
-    "mixdrop",
-    "hxfile",
-    "vidsrc",
-    "2embed",
-    "superembed",
-)
 
-
-def _resolve_videonode_stream(embed_url: str) -> dict | None:
-    """Mengekstrak file playlist HLS direct (.m3u8) dari pemutar videonode (LK21 / Layarkaca21)."""
-    m = re.search(r"videonode\.de/iframe3/([^/]+)/([^/?#]+)", embed_url)
-    if not m:
-        return None
-    host, vid_id = m.group(1), m.group(2)
-    req_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Referer": embed_url,
-    }
+def _host(url: str) -> str:
     try:
-        import httpx
+        return re.sub(r"^www\.", "", url.split("/")[2].lower())
+    except IndexError:
+        return ""
 
-        with httpx.Client(headers=req_headers, timeout=5.0) as cl:
-            resp = cl.post("https://videonode.de/api.php", data={"host": host, "id": vid_id})
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            play_url = data.get("embedUrl")
-            if not play_url:
-                return None
-            slug = play_url.split("?")[0].split("/")[-1]
-            verify_url = f"https://playcdn.de/verify/{slug}"
-            resp2 = cl.get(verify_url, headers={"Referer": play_url, "X-Requested-With": "XMLHttpRequest"})
-            if resp2.status_code == 200:
-                data2 = resp2.json()
-                if data2.get("fileUrl"):
-                    return {
-                        "stream_url": data2["fileUrl"],
-                        "title": data2.get("title"),
-                        "poster": data2.get("poster"),
-                        "server": host,
-                    }
-    except Exception:  # noqa: BLE001, S110
-        pass
-    return None
+
+def _embed_platform(url: str) -> str | None:
+    """Nama platform bila URL adalah pemutar embed yang bisa diunduh yt-dlp, selain itu None."""
+    host = _host(url)
+    if not host:
+        return None
+    named = next((name for h, name in EMBED_HOSTS.items() if host == h or host.endswith("." + h)), None)
+    if named:
+        return named
+    supported, ie_name = is_ytdlp_supported(url)
+    return (ie_name or host.split(".")[0]).replace(":", " ").title() if supported else None
 
 
 _TRAILER_RE = re.compile(r"\b(trailer|teaser|cuplikan)\b", re.I)
@@ -108,8 +76,8 @@ def _extract_ldjson_videos(
         url = absolutize(base, v_url)
         if not url:
             return
-        is_embed = any(h in url.lower() for h in EMBED_HOSTS) or any(k in url.lower() for k in STREAM_EMBED_KEYWORDS)
-        if is_embed:
+        if _kind_for(url, None, "embed") in (None, "embed"):
+            # Bukan file media (tanpa ekstensi, .php, .html, ...): halaman pemutar, diperiksa sebagai embed.
             player_urls.append((url, name))
         else:
             add_fn(url, default="video", poster=thumb, label=name, duration=dur)
@@ -171,6 +139,7 @@ def _extract_ldjson_subtitles(data: Any, base: str, add_fn: Any) -> None:
     elif isinstance(data, list):
         for item in data:
             _extract_ldjson_subtitles(item, base, add_fn)
+
 
 LANG_NAMES = {
     "id": "Indonesia",
@@ -314,8 +283,8 @@ def extract_av(soup: BeautifulSoup, base: str) -> tuple[list[Candidate], list[st
 
             data = json.loads(txt)
             _extract_ldjson_videos(data, base, add, player_urls, page_durations)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - JSON-LD rusak dari halaman tak tepercaya
+            log.debug("JSON-LD tidak dapat dibaca: %s", exc)
     for iframe in soup.find_all("iframe"):
         raw = iframe.get("src") or iframe.get("data-src") or iframe.get("data-url")
         url = absolutize(base, raw)
@@ -340,49 +309,20 @@ def extract_av(soup: BeautifulSoup, base: str) -> tuple[list[Candidate], list[st
     for url, label in player_urls:
         if not url or url in found:
             continue
-        try:
-            host = re.sub(r"^www\.", "", url.split("/")[2].lower())
-        except IndexError:
+        platform = _embed_platform(url)
+        if platform is None:
             continue
-
-        if "videonode.de" in host:
-            resolved = _resolve_videonode_stream(url)
-            if resolved and resolved.get("stream_url"):
-                s_url = resolved["stream_url"]
-                if s_url not in found:
-                    found[s_url] = Candidate(
-                        type="video",
-                        url=s_url,
-                        mime_type="video/mp4",
-                        downloadable=True,
-                        reason=None,
-                        preview_url=resolved.get("poster"),
-                        label=f"{resolved.get('title') or 'Movie'} ({resolved.get('server', 'p2p').upper()} - HLS Stream)",
-                        duration=page_dur,
-                        probe=False,
-                        options={"downloader": "yt-dlp"},
-                    )
-                continue
-
-        platform = next((name for h, name in EMBED_HOSTS.items() if host == h or host.endswith("." + h)), None)
-        is_player_embed = (
-            platform is not None
-            or any(k in host for k in STREAM_EMBED_KEYWORDS)
-            or any(k in url.lower() for k in STREAM_EMBED_KEYWORDS)
+        found[url] = Candidate(
+            type="video",
+            url=url,
+            mime_type="video/mp4",
+            downloadable=True,
+            reason=None,
+            label=f"{label or platform} Player Video.mp4",
+            duration=None if _is_trailer(label) else page_dur,
+            probe=False,
+            options={"downloader": "yt-dlp"},
         )
-        if is_player_embed:
-            name = platform or host.split(".")[0].capitalize()
-            found[url] = Candidate(
-                type="video",
-                url=url,
-                mime_type="video/mp4",
-                downloadable=True,
-                reason=None,
-                label=f"{label or name} Player Video.mp4",
-                duration=None if _is_trailer(label) else page_dur,
-                probe=False,
-                options={"downloader": "yt-dlp"},
-            )
 
     if blob_sources:
         warnings.append(
@@ -405,6 +345,7 @@ def extract_subtitles(soup: BeautifulSoup, base: str) -> list[Candidate]:
             url=url,
             mime_type=mime_from_ext(ext) or "text/vtt",
             language=(label or LANG_NAMES.get(lang_code or "", lang) or None),
+            language_code=lang_code if lang_code and re.fullmatch(r"[a-z]{2,3}", lang_code) else None,
             label=label,
         )
 
@@ -427,7 +368,7 @@ def extract_subtitles(soup: BeautifulSoup, base: str) -> list[Candidate]:
 
             data = json.loads(txt)
             _extract_ldjson_subtitles(data, base, add)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - JSON-LD rusak dari halaman tak tepercaya
+            log.debug("JSON-LD tidak dapat dibaca: %s", exc)
 
     return list(found.values())

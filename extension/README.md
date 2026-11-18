@@ -1,39 +1,36 @@
 # Universal Media Downloader — Browser Extension Helper
 
-Ekstensi browser resmi pendamping **Universal Media Downloader (UMD)** untuk Google Chrome, Microsoft Edge, Brave, dan Mozilla Firefox.
+Ekstensi pendamping **Universal Media Downloader (UMD)** untuk browser berbasis Chromium (Chrome, Edge, Brave).
 
 ## Fitur Utama
-1. **Penyadapan Lalu Lintas Jaringan (*Network Sniffing*)**:
-   - Otomatis menangkap tautan video `.m3u8` (HLS), `.mpd` (DASH), `.mp4`, `.webm`, dan subtitle `.vtt` / `.srt` saat Anda memutar video di tab browser apa pun.
-   - Angka badge pada ikon ekstensi menunjukkan jumlah stream yang terdeteksi.
-2. **Kirim 1-Klik ke Universal Media Downloader**:
-   - Langsung membuka Web UI (`http://localhost:3000/analyze?url=...`) dengan URL stream yang dipilih.
-3. **Pengekspor Cookie Sesi**:
-   - Tombol **"Salin Cookie Sesi"** untuk menyalin cookie login aktif dari tab saat ini, sehingga Anda bisa mengunduh konten privat / akun berbayar dengan mudah.
+1. **Penangkapan tautan media dari lalu lintas jaringan** (setelah Anda mengizinkannya):
+   - Menangkap manifest `.m3u8` (HLS), `.mpd` (DASH), file `.mp4`/`.webm`, dan subtitle `.vtt`/`.srt` saat video diputar.
+   - Segmen individual (`.ts`, `.m4s`) diabaikan karena tidak berguna diunduh satu per satu.
+   - Angka badge pada ikon menunjukkan jumlah tautan yang tertangkap di tab tersebut.
+2. **Kirim 1-klik ke UMD**: membuka Web UI (`<alamat Web UI>/analyze?url=...`) dengan tautan yang dipilih.
+3. **Salin cookies.txt**: menyalin cookie situs di tab aktif dalam format Netscape (lengkap dengan domain, path,
+   secure, HttpOnly, dan kedaluwarsa). Tempel di **Settings → Kredensial Sesi & Cookie** pada UMD; domainnya
+   terisi otomatis dan cookie hanya dikirim ke domain tersebut.
 
----
+Konten yang dilindungi DRM atau enkripsi pemutar tidak didukung.
 
-## Cara Memasang Ekstensi (Google Chrome / Edge / Brave)
+## Izin
 
-1. Buka browser Chromium pilihan Anda (Chrome, Edge, Brave, Opera).
-2. Buka halaman ekstensi:
-   - **Chrome**: `chrome://extensions`
-   - **Edge**: `edge://extensions`
-   - **Brave**: `brave://extensions`
-3. Aktifkan **Mode Pengembang (*Developer Mode*)** di pojok kanan atas.
-4. Klik tombol **Muat yang belum dibongkar (*Load unpacked*)**.
-5. Pilih folder:
-   ```text
-   C:\Software\laragon-6.0.0\www\media-downloader\extension
-   ```
-6. Ekstensi **Universal Media Downloader Helper** siap digunakan!
+| Izin | Kapan dipakai |
+|---|---|
+| `activeTab`, `scripting` | Memindai elemen `<video>`/`<track>` dan riwayat Resource Timing di tab aktif saat popup dibuka. |
+| `webRequest` + akses host **opsional** (`<all_urls>`) | Menangkap tautan media dari lalu lintas jaringan. Tidak aktif sampai Anda menekan **Izinkan penangkapan jaringan** di popup, dan bisa dicabut di **Pengaturan** popup. |
+| `cookies` | Hanya saat menekan **Salin cookies.txt**; izin akses diminta khusus untuk situs tab itu. |
+| `storage` | Menyimpan daftar tautan per tab (dihapus saat tab ditutup/berpindah halaman) dan alamat Web UI. |
 
----
+## Cara Memasang (Chrome / Edge / Brave)
+
+1. Buka halaman ekstensi (`chrome://extensions`, `edge://extensions`, atau `brave://extensions`).
+2. Aktifkan **Mode Pengembang (Developer Mode)**.
+3. Klik **Muat yang belum dibongkar (Load unpacked)** dan pilih folder `extension` di repositori ini.
 
 ## Cara Menggunakan
 
-1. Buka situs video apa pun (IDLIX, YouTube, portal streaming, situs berita, dsb.).
-2. Putar video selama 2–3 detik agar browser mulai memuat pecahan media.
-3. Klik ikon ekstensi di pojok kanan atas browser Anda.
-4. Anda akan melihat daftar stream yang tertangkap (`HLS Stream`, `MP4`, `Subtitle`).
-5. Klik **"Unduh via UMD"** atau **"Salin URL"** untuk mengunduh melalui Universal Media Downloader.
+1. Buka popup ekstensi. Bila UMD tidak berjalan di `http://localhost:3000`, ubah alamatnya di **Pengaturan**.
+2. Tekan **Izinkan penangkapan jaringan** (sekali saja), muat ulang tab, lalu putar videonya beberapa detik.
+3. Buka popup lagi: pilih **Unduh via UMD** atau **Salin URL** pada tautan yang tertangkap.

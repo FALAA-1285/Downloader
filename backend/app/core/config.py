@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     download_max_retries: int = 2
     download_concurrency: int = 3
     file_retention_hours: int = 24
+    # Riwayat job selesai/gagal/dibatalkan yang lebih tua dari ini dihapus otomatis (0 = simpan selamanya).
+    history_retention_days: int = 30
+    max_zip_size_mb: int = 4096
     analysis_retention_hours: int = 24
     cleanup_interval_seconds: int = 600
     # Job `pending` yang tidak diambil worker selama ini dianggap hilang dari antrean.
@@ -60,6 +63,13 @@ class Settings(BaseSettings):
     max_redirects: int = 5
     enable_dynamic_rendering: bool = True
     dynamic_render_timeout_seconds: float = 12.0
+    # Sandbox Chromium. Matikan (CHROMIUM_SANDBOX=false) hanya bila kernel/container tidak
+    # mendukungnya (mis. Docker tanpa user namespace); halaman tak tepercaya tetap dibatasi
+    # oleh proxy penjaga SSRF.
+    chromium_sandbox: bool = True
+    # Batas thread yt-dlp yang menganalisis sekaligus. Thread tidak bisa dihentikan paksa,
+    # jadi batas ini mencegah penumpukan thread saat analisis melewati batas waktu.
+    ytdlp_extract_concurrency: int = 2
     max_media_items: int = 500
     probe_limit: int = 80
     probe_concurrency: int = 4
@@ -111,6 +121,10 @@ class Settings(BaseSettings):
     @property
     def max_storage_bytes(self) -> int:
         return self.max_storage_mb * 1024 * 1024
+
+    @property
+    def max_zip_bytes(self) -> int:
+        return self.max_zip_size_mb * 1024 * 1024
 
     @property
     def max_page_bytes(self) -> int:

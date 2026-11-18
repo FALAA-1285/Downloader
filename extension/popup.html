@@ -12,7 +12,7 @@
       <div class="logo-icon"></div>
       <span class="logo-title">Media Downloader</span>
     </div>
-    <a href="http://localhost:3000" target="_blank" class="web-link" title="Buka Web UI">Web UI ↗</a>
+    <a id="webLink" href="#" target="_blank" rel="noopener" class="web-link" title="Buka Web UI">Web UI ↗</a>
   </header>
 
   <main class="main">
@@ -21,12 +21,15 @@
       <div class="tab-url" id="tabUrl">—</div>
     </div>
 
+    <div class="permission-box" id="permissionBox" hidden>
+      <p>Penangkapan stream dari lalu lintas jaringan belum diizinkan. Izin bisa dicabut kapan saja.</p>
+      <button id="btnGrant" class="btn btn-primary">Izinkan penangkapan jaringan</button>
+    </div>
+
     <div class="actions-row">
-      <button id="btnAnalyzePage" class="btn btn-primary">
-        Buka di Web UI
-      </button>
-      <button id="btnCopyCookies" class="btn btn-secondary" title="Salin cookie sesi tab ini">
-        Salin Cookie Sesi
+      <button id="btnAnalyzePage" class="btn btn-primary">Buka di Web UI</button>
+      <button id="btnCopyCookies" class="btn btn-secondary" title="Salin cookie tab ini dalam format cookies.txt">
+        Salin cookies.txt
       </button>
     </div>
 
@@ -35,12 +38,17 @@
       <span class="badge" id="mediaCount">0</span>
     </div>
 
-    <div id="mediaList" class="media-list">
-      <div class="empty-state">
-        <p>Belum ada stream terdeteksi.</p>
-        <small>Putar video di tab ini untuk memicu lalu lintas media.</small>
+    <div id="mediaList" class="media-list"></div>
+
+    <details class="settings">
+      <summary>Pengaturan</summary>
+      <label for="uiBase">Alamat Web UI</label>
+      <div class="settings-row">
+        <input id="uiBase" type="url" spellcheck="false" placeholder="http://localhost:3000">
+        <button id="btnSaveBase" class="btn-small">Simpan</button>
       </div>
-    </div>
+      <button id="btnRevoke" class="btn-link" hidden>Cabut izin penangkapan jaringan</button>
+    </details>
   </main>
 
   <footer class="footer">

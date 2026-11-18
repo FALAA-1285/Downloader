@@ -12,8 +12,9 @@ from sqlalchemy import delete, select
 
 from app.core.config import Settings
 from app.models.db import SessionFactory
-from app.models.models import Analysis, DownloadFile, DownloadHistory, DownloadJob, utcnow
+from app.models.models import TERMINAL_STATUSES, Analysis, DownloadFile, DownloadHistory, DownloadJob, utcnow
 
+from .download_runner import strip_secrets
 from .download_service import remove_file_async
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ class CleanupReport:
     stuck_jobs: int = 0
     stale_pending: int = 0
     analyses: int = 0
+    paused_expired: int = 0
+    secrets_wiped: int = 0
+    old_jobs: int = 0
 
 
 async def run_cleanup(sessions: SessionFactory, settings: Settings) -> CleanupReport:
@@ -80,12 +84,67 @@ async def run_cleanup(sessions: SessionFactory, settings: Settings) -> CleanupRe
         result = await s.execute(delete(Analysis).where(Analysis.expires_at < now))
         report.analyses = result.rowcount or 0
 
+        # Job yang dijeda terlalu lama dibatalkan; file parsialnya ikut dibersihkan di bawah.
+        paused_cutoff = now - timedelta(hours=settings.file_retention_hours)
+        paused_expired = (
+            await s.scalars(
+                select(DownloadJob).where(DownloadJob.status == "paused", DownloadJob.updated_at < paused_cutoff)
+            )
+        ).all()
+        for job in paused_expired:
+            job.status = "cancelled"
+            job.error_message = "Dibatalkan otomatis karena dijeda terlalu lama."
+            job.completed_at = now
+            job.options = strip_secrets(job.options)
+            s.add(DownloadHistory(job_id=job.id, action="cancelled", details={"error": "paused_expired"}))
+        report.paused_expired = len(paused_expired)
+
+        # Cookie/header pengguna pada job gagal hanya disimpan selama masa retry (H-02).
+        secret_cutoff = now - timedelta(hours=settings.analysis_retention_hours)
+        with_secrets = (
+            await s.scalars(
+                select(DownloadJob).where(
+                    DownloadJob.status.in_(TERMINAL_STATUSES),
+                    DownloadJob.options.is_not(None),
+                    DownloadJob.updated_at < secret_cutoff,
+                )
+            )
+        ).all()
+        for job in with_secrets:
+            cleaned = strip_secrets(job.options)
+            if cleaned != job.options:
+                job.options = cleaned
+                report.secrets_wiped += 1
+
+        # Retensi riwayat: job selesai/gagal/dibatalkan yang sudah lama dihapus beserta filenya.
+        if settings.history_retention_days > 0:
+            history_cutoff = now - timedelta(days=settings.history_retention_days)
+            old_jobs = (
+                await s.scalars(
+                    select(DownloadJob).where(
+                        DownloadJob.status.in_(TERMINAL_STATUSES), DownloadJob.updated_at < history_cutoff
+                    )
+                )
+            ).all()
+            for job in old_jobs:
+                if job.file is not None and job.file.deleted_at is None:
+                    await remove_file_async(settings, job.file.storage_key)
+                await s.delete(job)
+            report.old_jobs = len(old_jobs)
+
         known = set((await s.scalars(select(DownloadFile.storage_key).where(DownloadFile.deleted_at.is_(None)))).all())
+        paused_prefixes = tuple(
+            job_id.hex
+            for job_id in (await s.scalars(select(DownloadJob.id).where(DownloadJob.status == "paused"))).all()
+        )
         await s.commit()
 
-    # File sementara yang tertinggal (proses terhenti di tengah unduhan).
+    # File sementara yang tertinggal (proses terhenti di tengah unduhan). File parsial milik job
+    # yang dijeda dipertahankan agar unduhan bisa dilanjutkan.
     temp_age = settings.download_timeout_seconds * 2 + 300
-    report.temp_files = await asyncio.to_thread(_sweep, settings.temp_dir, max_age=temp_age, keep=set())
+    report.temp_files = await asyncio.to_thread(
+        _sweep, settings.temp_dir, max_age=temp_age, keep=set(), keep_prefixes=paused_prefixes
+    )
     # File di folder downloads tanpa catatan database.
     report.orphan_files = await asyncio.to_thread(_sweep, settings.downloads_dir, max_age=3600, keep=known)
 
@@ -94,13 +153,15 @@ async def run_cleanup(sessions: SessionFactory, settings: Settings) -> CleanupRe
     return report
 
 
-def _sweep(folder, *, max_age: float, keep: set[str]) -> int:
+def _sweep(folder, *, max_age: float, keep: set[str], keep_prefixes: tuple[str, ...] = ()) -> int:
     if not folder.exists():
         return 0
     removed = 0
     cutoff = time.time() - max_age
     for path in folder.iterdir():
         if not path.is_file() or path.name in keep or path.name.startswith("."):
+            continue
+        if keep_prefixes and path.name.startswith(keep_prefixes):
             continue
         try:
             if path.stat().st_mtime < cutoff:

@@ -1,18 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Universal Media Downloader Helper",
-  "version": "1.0.0",
-  "description": "Tangkap stream video HLS/DASH, subtitle, dan media langsung saat Anda browsing di situs apa pun.",
-  "permissions": [
-    "activeTab",
-    "webRequest",
-    "cookies",
-    "storage",
-    "scripting"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "version": "1.1.0",
+  "description": "Tangkap tautan stream HLS/DASH, video, dan subtitle dari tab yang Anda izinkan, lalu kirim ke Universal Media Downloader.",
+  "permissions": ["activeTab", "webRequest", "cookies", "storage", "scripting"],
+  "host_permissions": [],
+  "optional_host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },

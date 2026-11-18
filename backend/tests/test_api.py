@@ -136,7 +136,7 @@ async def test_analyze_upstream_errors(client, web):
 async def test_platform_recognized_but_not_downloadable(client, monkeypatch):
     monkeypatch.setattr(
         "app.adapters.platforms.social._ytdlp_extract_sync",
-        lambda url: {
+        lambda url, *args, **kwargs: {
             "title": "Video Uji Coba",
             "webpage_url": "https://www.youtube.com/watch?v=12345678901",
             "duration": 60,
@@ -208,14 +208,26 @@ async def test_download_flow(app, client, web, settings):  # TC-10
     # Uji pengemasan batch ZIP
     import io
     import zipfile
-    zip_res = await client.post("/api/v1/downloads/zip", json={"job_ids": [jobs[0]["id"], jobs[1]["id"]]})
+    created = await client.post(
+        "/api/v1/downloads/zip", json={"job_ids": [jobs[0]["id"], jobs[1]["id"]], "zip_name": 'koleksi "saya"'}
+    )
+    assert created.status_code == 201
+    meta = created.json()
+    assert meta["file_count"] == 2 and meta["skipped"] == 0 and meta["filename"] == "koleksi-saya.zip"
+    zip_res = await client.get(f"/api/v1/downloads/zip/{meta['id']}", params={"name": meta["filename"]})
     assert zip_res.status_code == 200
     assert zip_res.headers["content-type"] == "application/zip"
+    assert '"koleksi-saya.zip"' in zip_res.headers["content-disposition"]
     with zipfile.ZipFile(io.BytesIO(zip_res.content)) as zf:
         names = zf.namelist()
         assert len(names) == 2
         assert any(n.endswith(".png") for n in names)
         assert any(n.endswith(".srt") for n in names)
+        # Media tidak dikompresi ulang (H-05).
+        assert all(i.compress_type == zipfile.ZIP_STORED for i in zf.infolist())
+    # ZIP sekali pakai: dihapus setelah diunduh.
+    assert (await client.get(f"/api/v1/downloads/zip/{meta['id']}")).status_code == 404
+    assert (await client.get("/api/v1/downloads/zip/..%2F..%2Fsecret")).status_code == 404
 
     history = (await client.get("/api/v1/history")).json()
     assert {h["id"] for h in history} == {j["id"] for j in jobs}

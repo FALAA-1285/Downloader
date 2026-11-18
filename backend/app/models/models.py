@@ -25,7 +25,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 JSONType = JSON().with_variant(JSONB(), "postgresql")
 
-JOB_STATUSES = ("pending", "processing", "downloading", "completed", "failed")
+JOB_STATUSES = ("pending", "processing", "downloading", "paused", "completed", "failed", "cancelled")
+# Status akhir: job tidak lagi dikerjakan worker.
+TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 MEDIA_TYPES = ("image", "video", "audio", "subtitle", "text")
 
 

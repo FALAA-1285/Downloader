@@ -146,7 +146,7 @@ def test_ldjson_video_and_subtitle_extraction():
 
 
 def test_parse_duration_and_filename_extension():
-    from app.extractors.common import parse_duration, filename_from_url, Candidate
+    from app.extractors.common import Candidate, filename_from_url, parse_duration
 
     assert parse_duration("PT137M") == 8220.0
     assert parse_duration("PT2H17M") == 8220.0
@@ -180,7 +180,8 @@ def test_ldjson_duration_extraction():
         }
     }
     </script>
-    </head><body><iframe src="https://cloudemb.com/embed/xyz123"></iframe></body></html>"""
+    </head><body><iframe src="https://player.vimeo.com/video/123456"></iframe>
+    <iframe src="https://ads.example.net/video/player?slot=1"></iframe></body></html>"""
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "html.parser")
     base = "https://example.com/movie/test"

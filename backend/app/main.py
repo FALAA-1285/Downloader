@@ -20,6 +20,7 @@ from app.adapters.registry import AdapterRegistry
 from app.api.routes import analyze, downloads, history, system
 from app.core.config import APP_VERSION, Settings, get_settings
 from app.core.errors import AppError
+from app.core.guard_proxy import shutdown_guard_proxy
 from app.core.ratelimit import RateLimiter
 from app.core.url_guard import install_doh_socket_patch
 from app.models.db import make_engine, make_session_factory
@@ -77,6 +78,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 with contextlib.suppress(asyncio.CancelledError):
                     await cleanup_task
             await queue.shutdown()
+            from app.extractors.dynamic import shutdown_browser_pool
+
+            await shutdown_browser_pool()
+            await shutdown_guard_proxy()
             await engine.dispose()
 
     app = FastAPI(
@@ -110,7 +115,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ip = ipaddress.ip_address(host) if host else None
         except ValueError:
             ip = None
-        if ip is not None and not any(ip in net for net in networks):
+        # Klien tanpa alamat IP yang jelas (mis. unix socket/proxy tak dikenal) ditolak (L-05).
+        if ip is None or not any(ip in net for net in networks):
             return _error(403, "client_forbidden", "Akses dari jaringan ini tidak diizinkan.")
         path = request.url.path
         if path.startswith("/api/") and request.method != "OPTIONS":

@@ -1,176 +1,154 @@
-// Background Service Worker untuk Universal Media Downloader Helper (Manifest V3)
+// Background service worker — Universal Media Downloader Helper (Manifest V3).
+//
+// - Akses host bersifat opsional (M-08): penangkapan jaringan hanya aktif setelah pengguna
+//   mengizinkannya dari popup, dan izin bisa dicabut kapan saja.
+// - State disimpan di chrome.storage.session sehingga tetap ada saat service worker di-suspend.
+// - Penulisan per tab diserialkan agar request yang datang bersamaan tidak saling menimpa.
 
 const storageArea = chrome.storage.session || chrome.storage.local;
+const MAX_ITEMS_PER_TAB = 200;
 
-// Regex untuk mendeteksi stream video, subtitle, dan segmen
-const STREAM_REGEX = /((\.m3u8|\.mpd|\.mp4|\.webm|\.mkv|\.mov|\.vtt|\.srt|\.ts|\.m4s)(\?|$|#)|(\/hls\/|\/manifest|\/playlist|master\.m3u8))/i;
+// Manifest/playlist & file media utuh. Segmen (.ts/.m4s) sengaja tidak ditangkap: tidak berguna
+// diunduh satu per satu, dan pola ".ts" juga cocok dengan file TypeScript di situs pengembang.
+const MEDIA_REGEX = /\.(m3u8|mpd|mp4|webm|mkv|mov|vtt|srt)(\?|#|$)/i;
 
 const MEDIA_CONTENT_TYPES = [
   "application/x-mpegurl",
   "application/vnd.apple.mpegurl",
   "application/dash+xml",
-  "video/mp4",
-  "video/webm",
-  "video/quicktime",
-  "video/mp2t",
   "text/vtt",
   "application/x-subrip",
 ];
 
-const PLAYER_HOSTS = [
-  "cloudemb",
-  "videonode",
-  "streamtape",
-  "upstream",
-  "dood",
-  "mixdrop",
-  "fembed",
-  "embed",
-];
-
-function isMedia(url, headers = []) {
-  if (!url || url.startsWith("blob:") || url.startsWith("data:")) return false;
-  if (STREAM_REGEX.test(url)) return true;
-
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    if (PLAYER_HOSTS.some((p) => host.includes(p)) && url.includes("embed")) {
-      return true;
-    }
-  } catch {}
-
-  for (const h of headers) {
+function contentTypeOf(headers) {
+  for (const h of headers || []) {
     if (h.name && h.name.toLowerCase() === "content-type") {
-      const val = (h.value || "").toLowerCase().split(";")[0].trim();
-      if (MEDIA_CONTENT_TYPES.includes(val) || val.startsWith("video/")) {
-        return true;
-      }
+      return (h.value || "").toLowerCase().split(";")[0].trim();
     }
   }
-  return false;
+  return "";
 }
 
-function getMediaType(url, headers = []) {
-  const clean = url.split("?")[0].toLowerCase();
-  if (clean.includes(".m3u8") || clean.includes("hls")) return "HLS Stream (.m3u8)";
-  if (clean.includes(".mpd") || clean.includes("dash")) return "DASH Stream (.mpd)";
-  if (clean.includes(".vtt") || clean.includes(".srt")) return "Subtitle";
-  if (clean.includes(".mp4")) return "MP4 Video";
-  if (clean.includes(".webm")) return "WebM Video";
-  if (clean.includes(".ts") || clean.includes(".m4s")) return "HLS/DASH Segment";
+// Potongan stream platform (YouTube/googlevideo, dll.): bukan file utuh, video & audio terpisah,
+// dan bertanda tangan sementara. Platform ini diunduh lewat URL halamannya (yt-dlp di backend).
+const PLATFORM_SEGMENT_REGEX = /^https?:\/\/[^/]*\.(googlevideo\.com|ytimg\.com)\/|\/videoplayback\?/i;
 
-  for (const h of headers) {
-    if (h.name && h.name.toLowerCase() === "content-type") {
-      const val = (h.value || "").toLowerCase();
-      if (val.includes("mpegurl")) return "HLS Stream (.m3u8)";
-      if (val.includes("dash")) return "DASH Stream (.mpd)";
-      if (val.includes("vtt") || val.includes("subrip")) return "Subtitle";
-      if (val.includes("mp4")) return "MP4 Video";
-      if (val.includes("mp2t")) return "HLS Segment (.ts)";
-    }
-  }
-  return "Stream Video";
+function isMedia(url, headers) {
+  if (!url || !/^https?:/i.test(url)) return false;
+  if (PLATFORM_SEGMENT_REGEX.test(url)) return false;
+  if (MEDIA_REGEX.test(url)) return true;
+  const ct = contentTypeOf(headers);
+  return MEDIA_CONTENT_TYPES.includes(ct) || (ct.startsWith("video/") && ct !== "video/mp2t");
 }
 
-async function addMediaItem(tabId, url, headers = []) {
-  if (tabId < 0 || !url) return;
-  const key = `tab_${tabId}`;
-  const res = await storageArea.get(key);
-  const items = res[key] || [];
+function mediaType(url, headers) {
+  const clean = url.split(/[?#]/)[0].toLowerCase();
+  const ct = contentTypeOf(headers);
+  if (clean.endsWith(".m3u8") || ct.includes("mpegurl")) return "HLS Stream (.m3u8)";
+  if (clean.endsWith(".mpd") || ct.includes("dash")) return "DASH Stream (.mpd)";
+  if (clean.endsWith(".vtt") || clean.endsWith(".srt") || ct.includes("vtt") || ct.includes("subrip")) return "Subtitle";
+  if (clean.endsWith(".webm") || ct.includes("webm")) return "WebM Video";
+  if (clean.endsWith(".mp4") || ct.includes("mp4")) return "MP4 Video";
+  return "Video";
+}
 
-  if (items.some((i) => i.url === url)) return;
+const stripHash = (url) => (url || "").split("#")[0];
+const tabKey = (tabId) => `tab_${tabId}`;
 
-  const type = getMediaType(url, headers);
-  // Jangan spam badge dengan ratusan segmen .ts/.m4s individual jika stream master .m3u8 sudah tertangkap
-  const hasMaster = items.some((i) => i.url.includes(".m3u8"));
-  if (hasMaster && (type.includes("Segment") || url.includes(".ts"))) {
-    return;
-  }
-
-  items.push({
-    url,
-    type,
-    timestamp: Date.now(),
+// Antrean penulisan per tab (get → ubah → set tidak atomik).
+const writeQueues = new Map();
+function withTabLock(tabId, fn) {
+  const prev = writeQueues.get(tabId) || Promise.resolve();
+  const next = prev.then(fn, fn).finally(() => {
+    if (writeQueues.get(tabId) === next) writeQueues.delete(tabId);
   });
-
-  await storageArea.set({ [key]: items });
-
-  try {
-    chrome.action.setBadgeText({ tabId, text: String(items.length) });
-    chrome.action.setBadgeBackgroundColor({ tabId, color: "#F97316" });
-  } catch {}
+  writeQueues.set(tabId, next);
+  return next;
 }
 
-// Tangkap sebelum request (cepat, tidak bergantung pada respons jaringan selesai)
+async function readTab(tabId) {
+  const res = await storageArea.get(tabKey(tabId));
+  const value = res[tabKey(tabId)];
+  // Format lama (array) dianggap kosong.
+  return value && Array.isArray(value.items) ? value : { page: null, items: [] };
+}
+
+function setBadge(tabId, count) {
+  chrome.action.setBadgeText({ tabId, text: count ? String(count) : "" }).catch(() => {});
+  if (count) chrome.action.setBadgeBackgroundColor({ tabId, color: "#F97316" }).catch(() => {});
+}
+
+function addMediaItem(tabId, url, headers) {
+  if (tabId < 0 || !url) return Promise.resolve();
+  return withTabLock(tabId, async () => {
+    const state = await readTab(tabId);
+    if (state.items.some((i) => i.url === url) || state.items.length >= MAX_ITEMS_PER_TAB) return;
+    state.items.push({ url, type: mediaType(url, headers), timestamp: Date.now() });
+    await storageArea.set({ [tabKey(tabId)]: state });
+    setBadge(tabId, state.items.length);
+  });
+}
+
+function clearTab(tabId) {
+  return withTabLock(tabId, async () => {
+    await storageArea.remove(tabKey(tabId));
+    setBadge(tabId, 0);
+  });
+}
+
+// Listener didaftarkan di top level agar tetap aktif setelah service worker dibangunkan ulang.
+// Event hanya diterima untuk host yang sudah diizinkan pengguna.
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    const { tabId, url } = details;
-    if (isMedia(url)) {
-      addMediaItem(tabId, url);
-    }
-  },
-  { urls: ["<all_urls>"] }
-);
-
-// Tangkap juga saat respons header diterima (memeriksa content-type)
-chrome.webRequest.onResponseStarted.addListener(
-  (details) => {
-    const { tabId, url, responseHeaders } = details;
-    if (isMedia(url, responseHeaders)) {
-      addMediaItem(tabId, url, responseHeaders);
-    }
+    if (isMedia(details.url)) addMediaItem(details.tabId, details.url);
   },
   { urls: ["<all_urls>"] },
-  ["responseHeaders"]
 );
 
-// Bersihkan hanya saat tab ditutup
+chrome.webRequest.onResponseStarted.addListener(
+  (details) => {
+    if (isMedia(details.url, details.responseHeaders)) addMediaItem(details.tabId, details.url, details.responseHeaders);
+  },
+  { urls: ["<all_urls>"] },
+  ["responseHeaders"],
+);
+
 chrome.tabs.onRemoved.addListener((tabId) => {
-  storageArea.remove(`tab_${tabId}`);
+  storageArea.remove(tabKey(tabId));
+  writeQueues.delete(tabId);
 });
 
-// Bersihkan hanya bila URL tab berpindah ke halaman lain (bukan reload atau hash change)
+// Bersihkan saat tab berpindah ke halaman lain. Perubahan hash (#...) atau reload ke URL yang
+// sama tidak menghapus daftar.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url) {
-    storageArea.remove(`tab_${tabId}`);
-    try {
-      chrome.action.setBadgeText({ tabId, text: "" });
-    } catch {}
-  }
+  if (!changeInfo.url) return;
+  const page = stripHash(changeInfo.url);
+  withTabLock(tabId, async () => {
+    const state = await readTab(tabId);
+    if (state.page === page) return;
+    await storageArea.set({ [tabKey(tabId)]: { page, items: [] } });
+    setBadge(tabId, 0);
+  });
 });
 
-// Penangan pesan komunikasi dengan popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Hanya popup ekstensi ini yang boleh mengirim perintah.
+  if (sender.id !== chrome.runtime.id || sender.tab) return false;
+
   if (request.action === "getCapturedMedia") {
-    const key = `tab_${request.tabId}`;
-    storageArea.get(key).then((res) => {
-      sendResponse({ media: res[key] || [] });
-    });
-    return true; // async
+    readTab(request.tabId).then((state) => sendResponse({ media: state.items }));
+    return true;
   }
-
-  if (request.action === "getTabCookies") {
-    chrome.cookies.getAll({ url: request.url }, (cookies) => {
-      const cookieStr = (cookies || []).map((c) => `${c.name}=${c.value}`).join("; ");
-      sendResponse({ cookies: cookieStr });
-    });
-    return true; // async
-  }
-
   if (request.action === "addMediaDirect") {
-    addMediaItem(request.tabId, request.url, request.headers || []).then(() => {
-      sendResponse({ success: true });
-    });
-    return true; // async
+    const urls = Array.isArray(request.urls) ? request.urls : [request.url];
+    Promise.all(urls.filter((u) => isMedia(u)).map((u) => addMediaItem(request.tabId, u))).then(() =>
+      sendResponse({ success: true }),
+    );
+    return true;
   }
-
   if (request.action === "clearCapturedMedia") {
-    storageArea.remove(`tab_${request.tabId}`).then(() => {
-      try {
-        chrome.action.setBadgeText({ tabId: request.tabId, text: "" });
-      } catch {}
-      sendResponse({ success: true });
-    });
-    return true; // async
+    clearTab(request.tabId).then(() => sendResponse({ success: true }));
+    return true;
   }
+  return false;
 });

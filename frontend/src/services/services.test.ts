@@ -100,3 +100,87 @@ describe("jobs-store", () => {
     expect(result.current.map((j) => j.id)).toEqual(["b"]);
   });
 });
+
+describe("cookie per domain (C-03)", () => {
+  it("hanya mengirim cookie milik domain URL yang dianalisis", async () => {
+    const { api, fetchMock } = await loadWithBackend(async () => json({}));
+    const cookies = await import("@/lib/cookie-store");
+    cookies.__resetCookieCache();
+    cookies.saveCookieEntry("instagram.com", "sessionid=ig");
+
+    await api.analyzeUrl("https://www.instagram.com/p/abc/", []);
+    await api.analyzeUrl("https://evil.example/page", []);
+    await api.createDownloads("an-1", ["m-1"], "original", undefined, "https://instagram.com/reel/x");
+
+    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    expect(bodies[0].cookies).toBe("sessionid=ig");
+    expect(bodies[1].cookies).toBeUndefined();
+    expect(bodies[2].cookies).toBe("sessionid=ig");
+  });
+
+  it("menghapus cookie global lama dan menebak domain dari cookies.txt", async () => {
+    localStorage.setItem("umd_session_cookies", "sid=lama");
+    const cookies = await import("@/lib/cookie-store");
+    cookies.__resetCookieCache();
+    expect(cookies.readCookieEntries()).toEqual({});
+    expect(localStorage.getItem("umd_session_cookies")).toBeNull();
+    expect(cookies.guessCookieDomain("#HttpOnly_.www.example.com\tTRUE\t/\tTRUE\t0\tsid\tx")).toBe("example.com");
+    expect(cookies.normalizeDomain("https://Sub.Example.com:8080/x")).toBe("sub.example.com");
+    expect(cookies.normalizeDomain("bukan domain")).toBeNull();
+  });
+});
+
+describe("kontrol unduhan & polling", () => {
+  const remoteJob = (id: string, status: string) => ({
+    id,
+    status,
+    progress: null,
+    filename: `${id}.mp4`,
+    media_type: "video",
+    source_url: "https://a.example/",
+    source_domain: "a.example",
+    size_downloaded: 0,
+    size_total: null,
+    error_message: null,
+    created_at: "2026-11-17T00:00:00Z",
+    completed_at: null,
+    expires_at: null,
+  });
+
+  it("menjeda, melanjutkan, dan membatalkan lewat endpoint khusus", async () => {
+    const { store, fetchMock } = await loadWithBackend(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/history")) return json([remoteJob("a", "downloading")]);
+      const action = url.split("/").pop();
+      const status = { pause: "paused", resume: "pending", cancel: "cancelled" }[action as string] ?? "pending";
+      return json(remoteJob("a", status));
+    });
+    await store.syncHistory();
+    await store.pauseJob("a");
+    await store.resumeJob("a");
+    await store.cancelJob("a");
+    const urls = fetchMock.mock.calls.map(([u]) => String(u));
+    expect(urls.slice(1)).toEqual([
+      "http://api.test/api/v1/downloads/a/pause",
+      "http://api.test/api/v1/downloads/a/resume",
+      "http://api.test/api/v1/downloads/a/cancel",
+    ]);
+    const { renderHook } = await import("@testing-library/react");
+    expect(renderHook(() => store.useJobs()).result.current[0].status).toBe("cancelled");
+  });
+
+  it("ZIP dibuat di server lalu diunduh lewat tautan biasa (H-05)", async () => {
+    const { api, fetchMock } = await loadWithBackend(async () =>
+      json({ id: "f".repeat(32), filename: "koleksi.zip", size: 10, file_count: 2, skipped: 0 }, 201),
+    );
+    const clicks: string[] = [];
+    const spy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      clicks.push(this.href);
+    });
+    const meta = await api.downloadZipFile(["a", "b"], "koleksi");
+    spy.mockRestore();
+    expect(meta.file_count).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // tanpa token: tidak ada fetch blob
+    expect(clicks[0]).toBe(`http://api.test/api/v1/downloads/zip/${"f".repeat(32)}?name=koleksi.zip`);
+  });
+});

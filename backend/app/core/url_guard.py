@@ -45,95 +45,108 @@ _ISP_BLOCK_NETWORKS = (
 
 _DOH_CACHE: dict[str, tuple[float, list[str]]] = {}
 _DOH_CACHE_TTL = 300.0
+_DOH_CACHE_MAX = 1024
+_DOH_HOSTS = ("cloudflare-dns.com", "dns.adguard-dns.com", "dns.google")
+# (template URL, header) — diminta untuk record A (1) lalu AAAA (28) bila A kosong.
+_DOH_ENDPOINTS = (
+    ("https://cloudflare-dns.com/dns-query?name={host}&type={rtype}", {"Accept": "application/dns-json"}),
+    ("https://dns.adguard-dns.com/resolve?name={host}&type={rtype}", {}),
+)
+_RECORD_TYPES = (("A", 1), ("AAAA", 28))
 
 
 def _is_isp_blocked_ip(ip: IPAddress) -> bool:
     return any(ip in net for net in _ISP_BLOCK_NETWORKS)
 
 
+def _cache_get(host: str) -> list[str] | None:
+    hit = _DOH_CACHE.get(host)
+    if hit and time.monotonic() - hit[0] < _DOH_CACHE_TTL:
+        return hit[1]
+    return None
+
+
+def _cache_put(host: str, addresses: list[str]) -> None:
+    if not addresses:
+        return
+    if len(_DOH_CACHE) >= _DOH_CACHE_MAX:
+        # Buang entri kedaluwarsa dulu; bila masih penuh, buang yang paling lama.
+        now = time.monotonic()
+        for key in [k for k, (t, _) in _DOH_CACHE.items() if now - t >= _DOH_CACHE_TTL]:
+            _DOH_CACHE.pop(key, None)
+        while len(_DOH_CACHE) >= _DOH_CACHE_MAX:
+            _DOH_CACHE.pop(min(_DOH_CACHE, key=lambda k: _DOH_CACHE[k][0]), None)
+    _DOH_CACHE[host] = (time.monotonic(), addresses)
+
+
+def _public_answers(data: object, record_type: int) -> list[str]:
+    out: list[str] = []
+    answers = data.get("Answer", []) if isinstance(data, dict) else []
+    for ans in answers:
+        if not isinstance(ans, dict) or ans.get("type") != record_type:
+            continue
+        try:
+            ip = ipaddress.ip_address(str(ans.get("data", "")).strip())
+        except ValueError:
+            continue
+        if is_public_ip(ip) and ip.compressed not in out:
+            out.append(ip.compressed)
+    return out
+
+
 async def resolve_doh(host: str) -> list[str]:
     """Resolusi DNS via DNS-over-HTTPS (DoH) untuk melewati pembajakan DNS ISP."""
-    now = time.monotonic()
-    if host in _DOH_CACHE:
-        cached_time, cached_ips = _DOH_CACHE[host]
-        if now - cached_time < _DOH_CACHE_TTL:
-            return cached_ips
-
-    endpoints = (
-        ("https://cloudflare-dns.com/dns-query?name={host}&type=A", {"Accept": "application/dns-json"}),
-        ("https://dns.adguard-dns.com/resolve?name={host}&type=A", {}),
-    )
+    cached = _cache_get(host)
+    if cached is not None:
+        return cached
     addresses: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            for url_tmpl, headers in endpoints:
-                try:
-                    resp = await client.get(url_tmpl.format(host=host), headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        for ans in data.get("Answer", []):
-                            if ans.get("type") == 1:
-                                raw_ip = str(ans.get("data", "")).strip()
-                                try:
-                                    ip = ipaddress.ip_address(raw_ip)
-                                    if is_public_ip(ip) and ip.compressed not in addresses:
-                                        addresses.append(ip.compressed)
-                                except ValueError:
-                                    continue
-                        if addresses:
-                            break
-                except Exception as exc:
-                    log.debug("DoH query gagal pada endpoint %s: %s", url_tmpl, exc)
-    except Exception as exc:
+            for rtype, code in _RECORD_TYPES:
+                for url_tmpl, headers in _DOH_ENDPOINTS:
+                    try:
+                        resp = await client.get(url_tmpl.format(host=host, rtype=rtype), headers=headers)
+                        if resp.status_code == 200:
+                            addresses = _public_answers(resp.json(), code)
+                            if addresses:
+                                break
+                    except Exception as exc:  # noqa: BLE001 - endpoint berikutnya dicoba
+                        log.debug("DoH query gagal pada endpoint %s: %s", url_tmpl, exc)
+                if addresses:
+                    break
+    except Exception as exc:  # noqa: BLE001
         log.debug("DoH query gagal untuk %s: %s", host, exc)
-
-    if addresses:
-        _DOH_CACHE[host] = (now, addresses)
+    _cache_put(host, addresses)
     return addresses
 
 
 def resolve_doh_sync(host: str) -> list[str]:
     """Versi sinkronus DoH untuk socket patch dan proses thread."""
-    if host in ("cloudflare-dns.com", "dns.adguard-dns.com", "dns.google"):
+    if host in _DOH_HOSTS:
         return []
-    now = time.monotonic()
-    if host in _DOH_CACHE:
-        cached_time, cached_ips = _DOH_CACHE[host]
-        if now - cached_time < _DOH_CACHE_TTL:
-            return cached_ips
+    cached = _cache_get(host)
+    if cached is not None:
+        return cached
 
     import json
     import urllib.request
 
-    endpoints = (
-        (
-            "https://cloudflare-dns.com/dns-query?name={host}&type=A",
-            {"Accept": "application/dns-json", "User-Agent": "curl/8.0"},
-        ),
-        ("https://dns.adguard-dns.com/resolve?name={host}&type=A", {"User-Agent": "curl/8.0"}),
-    )
     addresses: list[str] = []
-    for url_tmpl, headers in endpoints:
-        try:
-            req = urllib.request.Request(url_tmpl.format(host=host), headers=headers)  # noqa: S310
-            with urllib.request.urlopen(req, timeout=5.0) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode("utf-8"))
-                for ans in data.get("Answer", []):
-                    if ans.get("type") == 1:
-                        raw_ip = str(ans.get("data", "")).strip()
-                        try:
-                            ip = ipaddress.ip_address(raw_ip)
-                            if is_public_ip(ip) and ip.compressed not in addresses:
-                                addresses.append(ip.compressed)
-                        except ValueError:
-                            continue
+    for rtype, code in _RECORD_TYPES:
+        for url_tmpl, headers in _DOH_ENDPOINTS:
+            try:
+                req = urllib.request.Request(  # noqa: S310 - endpoint DoH tetap
+                    url_tmpl.format(host=host, rtype=rtype), headers={**headers, "User-Agent": "curl/8.0"}
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:  # noqa: S310
+                    addresses = _public_answers(json.loads(resp.read().decode("utf-8")), code)
                 if addresses:
                     break
-        except Exception as exc:
-            log.debug("Sync DoH query gagal pada %s: %s", url_tmpl, exc)
-
-    if addresses:
-        _DOH_CACHE[host] = (now, addresses)
+            except Exception as exc:  # noqa: BLE001 - endpoint berikutnya dicoba
+                log.debug("Sync DoH query gagal pada %s: %s", url_tmpl, exc)
+        if addresses:
+            break
+    _cache_put(host, addresses)
     return addresses
 
 
@@ -170,7 +183,6 @@ def install_doh_socket_patch() -> None:
             raise
 
     socket.getaddrinfo = _doh_getaddrinfo
-
 
 
 @dataclass(frozen=True)

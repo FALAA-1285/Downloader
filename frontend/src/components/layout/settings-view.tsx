@@ -3,7 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Ban, CircleCheck, Clock, Monitor, Moon, Sun } from "lucide-react";
 import type { AdapterInfo, ServerConfig } from "@/types";
-import { IS_DEMO, getAdapters, getConfig, getHealth, getStoredCookies, setStoredCookies } from "@/services/api";
+import { IS_DEMO, getAdapters, getConfig, getHealth } from "@/services/api";
 import { removeJobs, useJobs } from "@/services/jobs-store";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/primitives";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { CookieManager } from "./cookie-manager";
 import { setTheme, useThemePref, type ThemePref } from "./theme";
 
 const THEMES: Array<{ id: ThemePref; label: string; icon: typeof Sun }> = [
@@ -56,17 +57,16 @@ export function SettingsView() {
   const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null);
   const [health, setHealth] = useState<"checking" | "up" | "down">("checking");
   const [loadError, setLoadError] = useState(false);
-  const [cookieInput, setCookieInput] = useState("");
-  const [cookieSaved, setCookieSaved] = useState(false);
 
   useEffect(() => {
-    setCookieInput(getStoredCookies() || "");
     getConfig().then(setConfig).catch(() => setLoadError(true));
     getAdapters().then(setAdapters).catch(() => setLoadError(true));
     getHealth().then((ok) => setHealth(ok ? "up" : "down"));
   }, []);
 
-  const finishedIds = jobs.filter((j) => j.status === "completed" || j.status === "failed").map((j) => j.id);
+  const finishedIds = jobs
+    .filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled")
+    .map((j) => j.id);
 
   return (
     <div className="frame flex flex-1 flex-col">
@@ -100,49 +100,9 @@ export function SettingsView() {
 
       <Section
         title="Kredensial Sesi & Cookie"
-        description="Cookie login tersimpan di browser ini. Berguna untuk mengunduh konten dari situs yang membutuhkan login, dibatasi usia, atau konten berbayar/privat (seperti YouTube, Instagram, X, Patreon, atau portal film)."
+        description="Cookie login per domain, tersimpan di browser ini. Dipakai untuk konten di akun Anda sendiri yang membutuhkan login atau dibatasi usia. Cookie hanya dikirim ke domain pemiliknya."
       >
-        <div className="max-w-xl space-y-3">
-          <textarea
-            value={cookieInput}
-            onChange={(e) => {
-              setCookieInput(e.target.value);
-              setCookieSaved(false);
-            }}
-            placeholder="Tempel format Netscape cookies.txt atau key=value; (misal: sessionid=xyz123; csrftoken=abc;)"
-            rows={4}
-            className="w-full rounded-xl border border-line-strong bg-bg p-3 font-mono text-[12px] text-ink outline-none placeholder:text-muted-foreground/60 focus:border-brand focus:shadow-[0_0_0_3px_var(--ring-soft)]"
-          />
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => {
-                  setStoredCookies(cookieInput);
-                  setCookieSaved(true);
-                  setTimeout(() => setCookieSaved(false), 2500);
-                }}
-              >
-                {cookieSaved ? "Tersimpan!" : "Simpan Cookie"}
-              </Button>
-              {cookieInput ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setCookieInput("");
-                    setStoredCookies(null);
-                  }}
-                >
-                  Hapus
-                </Button>
-              ) : null}
-            </div>
-            {cookieSaved && <span className="text-[12px] text-ok">Cookie berhasil disimpan di browser.</span>}
-          </div>
-        </div>
+        <CookieManager />
       </Section>
 
       <Section

@@ -15,6 +15,9 @@ x-backend: &backend
     STORAGE_PATH: /app/storage
     # Browser di host masuk lewat gateway bridge Docker (172.16.0.0/12); port tetap hanya dibuka di 127.0.0.1.
     ALLOWED_CLIENT_NETWORKS: 127.0.0.0/8,::1/128,172.16.0.0/12
+    # Sandbox Chromium membutuhkan user namespace yang tidak tersedia di profil seccomp default
+    # Docker. Halaman yang dirender tetap hanya bisa menjangkau alamat publik lewat proxy penjaga SSRF.
+    CHROMIUM_SANDBOX: "false"
   volumes:
     - storage:/app/storage
   depends_on:

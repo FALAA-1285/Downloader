@@ -12,6 +12,7 @@ import re
 import httpx
 
 from app.core.config import Settings
+from app.core.cookies import Cookie
 from app.core.errors import AppError, UnsafeURLError
 from app.core.http_client import open_stream
 
@@ -38,7 +39,11 @@ def _total_from_content_range(value: str | None) -> int | None:
 
 
 async def _probe_one(
-    client: httpx.AsyncClient, item: Candidate, settings: Settings, referer: str | None = None
+    client: httpx.AsyncClient,
+    item: Candidate,
+    settings: Settings,
+    referer: str | None = None,
+    cookies: list[Cookie] | None = None,
 ) -> None:
     label = TYPE_LABEL.get(item.type, "Media")
     base_headers = {"Referer": referer} if referer else {}
@@ -46,7 +51,10 @@ async def _probe_one(
         headers = dict(base_headers)
         if extra_headers:
             headers.update(extra_headers)
-        async with open_stream(client, item.url, settings, method=method, headers=headers or None) as (resp, _final):
+        async with open_stream(client, item.url, settings, method=method, headers=headers or None, cookies=cookies) as (
+            resp,
+            _final,
+        ):
             if method == "HEAD" and resp.status_code in (403, 405, 501):
                 continue  # sebagian server menolak HEAD
             if resp.status_code >= 400:
@@ -77,7 +85,11 @@ async def _probe_one(
 
 
 async def probe_candidates(
-    client: httpx.AsyncClient, items: list[Candidate], settings: Settings, referer: str | None = None
+    client: httpx.AsyncClient,
+    items: list[Candidate],
+    settings: Settings,
+    referer: str | None = None,
+    cookies: list[Cookie] | None = None,
 ) -> list[str]:
     """Memeriksa item secara in-place. Mengembalikan peringatan."""
     targets = [i for i in items if i.probe and i.downloadable][: settings.probe_limit]
@@ -87,7 +99,7 @@ async def probe_candidates(
     async def guarded(item: Candidate) -> None:
         async with semaphore:
             try:
-                await _probe_one(client, item, settings, referer=referer)
+                await _probe_one(client, item, settings, referer=referer, cookies=cookies)
             except UnsafeURLError:
                 item.downloadable = False
                 item.reason = "Alamat media mengarah ke jaringan internal dan diblokir."

@@ -6,8 +6,10 @@ export type JobStatus =
   | "pending"
   | "processing"
   | "downloading"
+  | "paused"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type SubtitleFormat = "original" | "srt";
 
@@ -36,6 +38,8 @@ export interface MediaItem {
   height?: number | null;
   duration?: number | null;
   language?: string | null;
+  /** Kode bahasa ISO 639-1 (mis. "id"), bila diketahui. */
+  language_code?: string | null;
   preview_url?: string | null;
 }
 

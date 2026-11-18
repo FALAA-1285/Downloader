@@ -78,13 +78,19 @@ Test `ffprobe` dilewati otomatis jika FFmpeg tidak terpasang.
 
 | Method | Endpoint | Fungsi |
 | --- | --- | --- |
-| POST | `/analyze` | Menganalisis URL. Body: `{"url", "media_types": []}` |
+| POST | `/analyze` | Menganalisis URL. Body: `{"url", "media_types": [], "cookies"?, "headers"?}` |
 | GET | `/jobs/{id}` | Ringkasan hasil analisis |
 | GET | `/jobs/{id}/media` | Hasil analisis lengkap yang tersimpan |
 | POST | `/downloads` | Membuat pekerjaan unduhan. Body: `{"analysis_id", "media_ids": [], "subtitle_format": "original"\|"srt"}` |
 | GET | `/downloads/{id}` | Status dan progres |
-| POST | `/downloads/{id}/retry` | Mengulang pekerjaan yang gagal |
+| POST | `/downloads/status` | Status banyak job sekaligus. Body: `{"ids": []}` |
+| POST | `/downloads/{id}/pause` | Menjeda job antre/berjalan (file parsial disimpan) |
+| POST | `/downloads/{id}/resume` | Melanjutkan job yang dijeda (HTTP Range / `.part` yt-dlp) |
+| POST | `/downloads/{id}/cancel` | Membatalkan job dan menghapus file parsialnya |
+| POST | `/downloads/{id}/retry` | Mengulang pekerjaan yang gagal atau dibatalkan |
 | GET | `/downloads/{id}/file` | Mengunduh file hasil |
+| POST | `/downloads/zip` | Membuat ZIP dari beberapa job selesai. Body: `{"job_ids": [], "zip_name"?}` → `{id, filename, …}` |
+| GET | `/downloads/zip/{id}` | Mengunduh ZIP tersebut (sekali pakai, `?name=`) |
 | GET | `/history` | Riwayat (`?status=&media_type=&q=`) |
 | DELETE | `/history/{id}` | Menghapus riwayat beserta file sementaranya |
 | GET | `/health`, `/adapters`, `/config` | Status sistem, adapter, dan konfigurasi |
@@ -105,7 +111,13 @@ bukan dari URL sembarang yang dikirim klien.
 - **SSRF:** hanya http/https dan port dalam allowlist. Alamat lokal, privat, link-local, multicast,
   dan metadata cloud diblokir. IP tujuan diperiksa ulang **setiap kali koneksi TCP dibuka**,
   termasuk di setiap redirect, sehingga DNS rebinding tidak bisa lolos.
-- Tidak memakai proxy dari environment, tidak meneruskan cookie atau kredensial ke domain lain.
+- **yt-dlp dan Chromium (Playwright)** membuka koneksinya sendiri, jadi semua lalu lintas keduanya
+  dilewatkan proxy penjaga lokal (`app/core/guard_proxy.py`) yang menerapkan aturan yang sama per
+  koneksi (CONNECT/HTTP), termasuk URL segmen di dalam manifest HLS/DASH dan sub-resource halaman.
+- **Cookie per domain:** cookie pengguna (cookies.txt, JSON, atau `nama=nilai`) diikat ke domainnya
+  dan hanya dikirim ke host yang cocok. `Cookie`/`Authorization` dibuang saat redirect pindah host.
+  Cookie tidak disimpan di hasil analisis dan dihapus dari job begitu job selesai/dibatalkan.
+- Tidak memakai proxy dari environment.
 - Batas ukuran halaman, ukuran file, total storage, timeout koneksi/baca/total, dan rate limit.
 - Isi file divalidasi dengan magic bytes (bukan ekstensi atau header sumber). File di luar
   allowlist, termasuk executable, ditolak. Video/audio dicek dengan `ffprobe` bila tersedia.

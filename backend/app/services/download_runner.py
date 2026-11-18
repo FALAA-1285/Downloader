@@ -3,10 +3,15 @@
 Dipakai oleh antrean inline (proses API) maupun worker RQ.
 - Job diklaim secara atomik (`pending` → `processing`), sehingga tidak diproses dua kali.
 - Streaming ke file sementara; tulis disk dilakukan di thread agar event loop tidak terblokir.
-- Batas ukuran per file (lebih kecil untuk subtitle), batas total storage, dan batas waktu total.
+- Batas ukuran per file (lebih kecil untuk subtitle), batas total storage, dan batas waktu total —
+  berlaku untuk jalur HTTP langsung MAUPUN yt-dlp (H-03).
 - Retry terbatas untuk error sementara.
 - Isi divalidasi dengan magic bytes; video/audio dicek ffprobe dengan whitelist protokol & format.
-- File sementara selalu dibersihkan bila gagal.
+- Jeda / lanjut / batal (H-06): endpoint mengubah status job; runner memeriksanya setiap kali
+  melaporkan progres lalu berhenti. Jeda menyimpan file parsial agar bisa dilanjutkan (HTTP Range
+  atau `.part` yt-dlp); batal dan gagal membersihkannya.
+- Semua koneksi yt-dlp lewat proxy penjaga SSRF (C-01); cookie terikat domain (C-03, H-01) dan
+  dihapus dari database begitu job selesai (H-02).
 """
 
 from __future__ import annotations
@@ -15,11 +20,13 @@ import asyncio
 import errno
 import logging
 import os
+import re
 import shutil
 import subprocess
-import tempfile
+import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -28,23 +35,31 @@ import yt_dlp
 from sqlalchemy import func, select, update
 
 from app.core.config import Settings
+from app.core.cookies import parse_cookies
 from app.core.errors import AppError, TransientError
+from app.core.guard_proxy import get_guard_proxy
 from app.core.http_client import build_client, is_encoded, iter_body, open_stream, status_error
 from app.core.url_guard import redact_url, validate_url
 from app.downloaders.file_validator import Kind, resolve_kind
 from app.downloaders.subtitles import validate_subtitle, vtt_to_srt
+from app.downloaders.ytdlp_common import base_options, cookiefile, safe_headers
 from app.extractors.common import sanitize_filename
 from app.models.db import SessionFactory
-from app.models.models import DownloadFile, DownloadHistory, DownloadJob, utcnow
+from app.models.models import TERMINAL_STATUSES, DownloadFile, DownloadHistory, DownloadJob, utcnow
 
 log = logging.getLogger(__name__)
 
 CHUNK = 64 * 1024
 WRITE_BUFFER = 1024 * 1024
 PROGRESS_INTERVAL = 0.5
+YTDLP_PROGRESS_INTERVAL = 1.0
 SNIFF_BYTES = 4096
 FFPROBE_TIMEOUT = 30
 UNEXPECTED = "Terjadi kesalahan tak terduga saat mengunduh. Coba lagi."
+INTERRUPT_STATUSES = ("paused", "cancelled")
+SECRET_OPTIONS = ("cookies", "headers")
+_FORMAT_PART = re.compile(r"\.f\d+(-\d+)?")  # file per-format sebelum merge, mis. .f137
+PLATFORMS_VIA_YTDLP = ("youtube", "instagram", "facebook", "tiktok", "x", "social_other")
 
 # Demuxer FFmpeg yang boleh dipakai untuk setiap jenis hasil deteksi magic bytes. Tanpa
 # whitelist ini, ffprobe bisa mengenali konten lain (mis. playlist HLS) dan membuka sumber lain.
@@ -62,6 +77,37 @@ FFPROBE_FORMATS = {
 }
 
 
+class JobInterrupted(Exception):  # noqa: N818 - bukan error, sinyal kendali
+    """Job dijeda atau dibatalkan pengguna saat sedang berjalan."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+
+def partial_paths(temp_dir: Path, job_id: uuid.UUID) -> list[Path]:
+    """Semua file sementara milik job (unduhan HTTP dan file/fragmen yt-dlp)."""
+    if not temp_dir.exists():
+        return []
+    return [p for p in temp_dir.glob(f"{job_id.hex}*") if p.is_file()]
+
+
+def remove_partials(temp_dir: Path, job_id: uuid.UUID) -> None:
+    for path in partial_paths(temp_dir, job_id):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("gagal menghapus file sementara %s", path.name, exc_info=True)
+
+
+def strip_secrets(options: dict | None) -> dict | None:
+    """Opsi job tanpa cookie & header pengguna (H-02)."""
+    if not options:
+        return options
+    clean = {k: v for k, v in options.items() if k not in SECRET_OPTIONS}
+    return clean or None
+
+
 async def run_download(job_id: uuid.UUID, sessions: SessionFactory, settings: Settings) -> None:
     now = utcnow()
     async with sessions() as s:
@@ -72,7 +118,7 @@ async def run_download(job_id: uuid.UUID, sessions: SessionFactory, settings: Se
         )
         if claimed.rowcount != 1:
             await s.rollback()
-            return  # sudah diambil proses lain, dihapus, atau bukan pending
+            return  # sudah diambil proses lain, dihapus, dijeda, atau bukan pending
         s.add(DownloadHistory(job_id=job_id, action="started"))
         await s.commit()
 
@@ -81,6 +127,9 @@ async def run_download(job_id: uuid.UUID, sessions: SessionFactory, settings: Se
         attempt += 1
         try:
             await _attempt(job_id, sessions, settings, attempt)
+            return
+        except JobInterrupted as exc:
+            log.info("download %s dihentikan: %s", job_id, exc.status)
             return
         except TransientError as exc:
             if attempt <= settings.download_max_retries:
@@ -108,32 +157,33 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
         job = await s.get(DownloadJob, job_id)
         if job is None:
             return
+        if job.status in INTERRUPT_STATUSES:
+            raise JobInterrupted(job.status)
         job.attempts = attempt
-        job.size_downloaded = 0
         await s.commit()
         media_url, media_type = job.media_url, job.media_type
-        display_name, options = job.filename, job.options or {}
+        display_name, options = job.filename, dict(job.options or {})
         platform = job.platform
         source_url = job.source_url
 
     validate_url(media_url, settings.port_allowlist)
-    await _check_storage_capacity(sessions, settings, incoming=None, exclude=None)
+    await check_storage_capacity(sessions, settings, incoming=None, exclude=None)
 
     await asyncio.to_thread(settings.temp_dir.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(settings.downloads_dir.mkdir, parents=True, exist_ok=True)
     tmp_path = settings.temp_dir / f"{job_id.hex}.part"
-    is_social = (
-        platform in ("youtube", "instagram", "facebook", "tiktok", "x", "social_other")
+    lower_url = media_url.lower()
+    use_ytdlp = (
+        platform in PLATFORMS_VIA_YTDLP
         or options.get("downloader") == "yt-dlp"
-        or media_url.endswith((".m3u8", ".mpd"))
-        or ".m3u8" in media_url
-        or ".mpd" in media_url
+        or ".m3u8" in lower_url
+        or ".mpd" in lower_url
     )
+    keep_partial = False
     try:
-        if is_social:
-            loop = asyncio.get_running_loop()
-            head, size = await asyncio.to_thread(
-                _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions, source_url
+        if use_ytdlp:
+            head, size = await _run_ytdlp(
+                job_id, media_url, media_type, tmp_path, options, sessions, settings, source_url
             )
         else:
             try:
@@ -150,15 +200,21 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
                         custom_headers=options.get("headers"),
                     )
             except AppError as exc:
-                if (exc.status_code in (401, 403) or exc.code in ("forbidden", "auth_required")) and media_type in ("video", "audio"):
-                    log.info("direct stream %s gagal (%s), beralih ke yt-dlp", media_url, exc.message)
-                    loop = asyncio.get_running_loop()
-                    head, size = await asyncio.to_thread(
-                        _download_ytdlp_sync, media_url, media_type, tmp_path, options, job_id, loop, sessions, source_url
+                if (exc.status_code in (401, 403) or exc.code in ("forbidden", "auth_required")) and media_type in (
+                    "video",
+                    "audio",
+                ):
+                    log.info("direct stream %s gagal (%s), beralih ke yt-dlp", redact_url(media_url), exc.code)
+                    await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
+                    head, size = await _run_ytdlp(
+                        job_id, media_url, media_type, tmp_path, options, sessions, settings, source_url
                     )
                 else:
                     raise
         await _finalize(job_id, tmp_path, head, size, media_type, display_name, options, sessions, settings)
+    except JobInterrupted as exc:
+        keep_partial = exc.status == "paused"
+        raise
     except TimeoutError as exc:
         raise TransientError(
             f"Unduhan melewati batas waktu {settings.download_timeout_seconds} detik.", code="download_timeout"
@@ -166,7 +222,107 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
     except OSError as exc:
         raise _storage_error(exc) from exc
     finally:
-        await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
+        if not keep_partial:
+            await asyncio.to_thread(remove_partials, settings.temp_dir, job_id)
+
+
+# ---------------------------------------------------------------------------------------------
+# yt-dlp
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass
+class _Control:
+    """Sinyal antara event loop dan thread yt-dlp."""
+
+    deadline: float
+    max_bytes: int
+    loop: asyncio.AbstractEventLoop
+    stop: threading.Event = field(default_factory=threading.Event)
+    reason: str | None = None
+
+    def halt(self, reason: str) -> None:
+        if self.reason is None:
+            self.reason = reason
+        self.stop.set()
+
+
+class _Stopped(Exception):  # noqa: N818
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+async def _run_ytdlp(
+    job_id: uuid.UUID,
+    url: str,
+    media_type: str,
+    tmp_path: Path,
+    options: dict,
+    sessions: SessionFactory,
+    settings: Settings,
+    source_url: str | None,
+) -> tuple[bytes, int]:
+    proxy = await get_guard_proxy(settings)
+    loop = asyncio.get_running_loop()
+    max_bytes, limit_label = _size_limit(media_type, settings)
+    control = _Control(deadline=time.monotonic() + settings.download_timeout_seconds, max_bytes=max_bytes, loop=loop)
+    try:
+        # Batas waktu juga diperiksa di dalam thread (progress hook); ini jaring pengaman bila
+        # yt-dlp tertahan di fase tanpa progres (ekstraksi, koneksi).
+        async with asyncio.timeout(settings.download_timeout_seconds + 60):
+            return await asyncio.to_thread(
+                _download_ytdlp_sync,
+                url,
+                media_type,
+                tmp_path,
+                options,
+                job_id,
+                sessions,
+                settings,
+                proxy.url,
+                source_url,
+                control,
+            )
+    except TimeoutError:
+        control.halt("timeout")
+        raise
+    except asyncio.CancelledError:
+        control.halt("shutdown")
+        raise
+    except _Stopped as exc:
+        if exc.reason in INTERRUPT_STATUSES:
+            raise JobInterrupted(exc.reason) from None
+        if exc.reason == "timeout":
+            raise TimeoutError from None
+        if exc.reason == "too_large":
+            raise AppError("file_too_large", f"Unduhan dihentikan: file melebihi batas {limit_label}.", 413) from None
+        if exc.reason == "job_deleted":
+            raise AppError("job_deleted", "Pekerjaan dihapus saat berjalan.", 410) from None
+        raise AppError("download_failed", "Unduhan dihentikan.", 500) from None
+
+
+def _find_output(info: dict | None) -> Path | None:
+    """Path file akhir dari hasil yt-dlp (setelah merge/post-processing)."""
+    if not info:
+        return None
+    for entry in (info, *(info.get("entries") or [])):
+        if not isinstance(entry, dict):
+            continue
+        for dl in entry.get("requested_downloads") or []:
+            path = dl.get("filepath") or dl.get("_filename")
+            if path and Path(path).is_file():
+                return Path(path)
+        path = entry.get("filepath")
+        if path and Path(path).is_file():
+            return Path(path)
+    return None
+
+
+def _approx_size(info: dict) -> int | None:
+    formats = info.get("requested_formats") or [info]
+    sizes = [f.get("filesize") or f.get("filesize_approx") for f in formats]
+    return sum(sizes) if sizes and all(sizes) else None
 
 
 def _download_ytdlp_sync(
@@ -175,151 +331,182 @@ def _download_ytdlp_sync(
     tmp_path: Path,
     options: dict,
     job_id: uuid.UUID,
-    loop: asyncio.AbstractEventLoop,
     sessions: SessionFactory,
-    source_url: str | None = None,
+    settings: Settings,
+    proxy_url: str,
+    source_url: str | None,
+    control: _Control,
 ) -> tuple[bytes, int]:
     clean_url = url.split("#")[0]
-    out_base = tmp_path.parent / f"{job_id.hex}_ytdlp"
-    out_tmpl = str(out_base) + ".%(ext)s"
-
+    temp_dir = tmp_path.parent
     ffmpeg_bin = shutil.which("ffmpeg")
-    ffmpeg_dir = str(Path(ffmpeg_bin).resolve().parent) if ffmpeg_bin else None
-
-    last_update_time = 0.0
-
-    async def _update_db(status: str, downloaded: int, total: int | None) -> None:
-        try:
-            async with sessions() as s:
-                job = await s.get(DownloadJob, job_id)
-                if job and job.status not in ("completed", "failed"):
-                    job.status = status
-                    job.size_downloaded = downloaded
-                    if total and total > 0:
-                        job.size_total = total
-                    await s.commit()
-        except Exception as exc:
-            log.debug("gagal memperbarui progres ke database: %s", exc)
+    last_report = 0.0
 
     def progress_hook(d: dict[str, Any]) -> None:
-        nonlocal last_update_time
+        nonlocal last_report
+        if control.stop.is_set():
+            raise yt_dlp.utils.DownloadCancelled(control.reason or "stopped")
+        if time.monotonic() > control.deadline:
+            control.halt("timeout")
+            raise yt_dlp.utils.DownloadCancelled("timeout")
+        if d.get("status") != "downloading":
+            return
+        downloaded = int(d.get("downloaded_bytes") or 0)
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+        if downloaded > control.max_bytes or (total and total > control.max_bytes * 1.05):
+            control.halt("too_large")
+            raise yt_dlp.utils.DownloadCancelled("too_large")
         now = time.monotonic()
-        status = d.get("status")
-        if status == "downloading":
-            downloaded = d.get("downloaded_bytes") or 0
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            if now - last_update_time >= 1.0:
-                last_update_time = now
-                asyncio.run_coroutine_threadsafe(_update_db("downloading", downloaded, total), loop)
-        elif status == "finished":
-            total = d.get("total_bytes") or d.get("downloaded_bytes") or 0
-            asyncio.run_coroutine_threadsafe(_update_db("processing", total, total), loop)
+        if now - last_report < YTDLP_PROGRESS_INTERVAL:
+            return
+        last_report = now
+        future = asyncio.run_coroutine_threadsafe(_report_progress(sessions, job_id, downloaded, total), control.loop)
+        try:
+            status = future.result(timeout=10)
+        except Exception as exc:  # noqa: BLE001 - progres gagal dicatat tidak menghentikan unduhan
+            log.debug("gagal memperbarui progres %s: %s", job_id, exc)
+            return
+        if status is None:
+            control.halt("job_deleted")
+        elif status in INTERRUPT_STATUSES:
+            control.halt(status)
+        if control.stop.is_set():
+            raise yt_dlp.utils.DownloadCancelled(control.reason or "stopped")
 
-    headers = {}
-    if source_url:
-        headers["Referer"] = source_url
-
-    cookie_file = None
-    cookies = options.get("cookies")
-    if cookies:
-        if any(c in cookies for c in ("\t", "# Netscape")):
-            tf = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt")
-            tf.write(cookies)
-            tf.flush()
-            tf.close()
-            cookie_file = tf.name
-            ydl_opts_cookies: dict[str, Any] = {"cookiefile": cookie_file}
+    referer = source_url if source_url and source_url != clean_url else None
+    with cookiefile(options.get("cookies"), source_url or clean_url, temp_dir) as cookie_path:
+        ydl_opts = base_options(
+            proxy_url, headers=safe_headers(options.get("headers"), referer=referer), cookie_path=cookie_path
+        ) | {
+            "paths": {"home": str(temp_dir), "temp": str(temp_dir)},
+            "outtmpl": f"{job_id.hex}_ytdlp.%(ext)s",
+            "playlist_items": "1",
+            "socket_timeout": 30,
+            "retries": 5,
+            "fragment_retries": 5,
+            "concurrent_fragment_downloads": 8,
+            "abort_on_unavailable_fragments": True,
+            "continuedl": True,
+            "http_chunk_size": 10485760,
+            "buffersize": 1024 * 1024,
+            "updatetime": False,
+            "progress_hooks": [progress_hook],
+        }
+        if ffmpeg_bin:
+            ydl_opts["ffmpeg_location"] = str(Path(ffmpeg_bin).resolve().parent)
+        if media_type == "audio":
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}
+            ]
         else:
-            headers["Cookie"] = cookies
-            ydl_opts_cookies = {}
-    else:
-        ydl_opts_cookies = {}
+            ydl_opts["format"] = options.get("format_id") or "bestvideo+bestaudio/best"
+            ydl_opts["merge_output_format"] = "mp4"
 
-    custom_headers = options.get("headers")
-    if isinstance(custom_headers, dict):
-        headers.update(custom_headers)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(clean_url, download=False) or {}
+                entry = (info.get("entries") or [info])[0] if info.get("_type") == "playlist" else info
+                if isinstance(entry, dict):
+                    if entry.get("is_live") or entry.get("live_status") == "is_live":
+                        raise AppError(
+                            "livestream_unsupported", "Siaran langsung (live stream) tidak dapat diunduh.", 422
+                        )
+                    duration = entry.get("duration")
+                    max_seconds = settings.max_video_duration_minutes * 60
+                    if duration and duration > max_seconds:
+                        raise AppError(
+                            "duration_limit_exceeded",
+                            f"Durasi media ({int(duration // 60)} menit) melebihi batas "
+                            f"{settings.max_video_duration_minutes} menit.",
+                            422,
+                        )
+                    approx = _approx_size(entry)
+                    if approx and approx > control.max_bytes:
+                        control.halt("too_large")
+                        raise _Stopped("too_large")
+                result = ydl.process_ie_result(info, download=True)
+        except yt_dlp.utils.DownloadCancelled as exc:
+            raise _Stopped(control.reason or "stopped") from exc
+        except yt_dlp.utils.YoutubeDLError as exc:
+            if control.reason:
+                raise _Stopped(control.reason) from exc
+            clean_msg = str(exc).split("ERROR:")[-1].strip()
+            if "tunnel connection failed: 403" in clean_msg.lower():
+                raise AppError("unsafe_url", "Alamat media mengarah ke jaringan internal dan diblokir.", 422) from exc
+            raise AppError("download_failed", f"Gagal mengunduh media: {clean_msg[:300]}", 502) from exc
 
-    ydl_opts: dict[str, Any] = {
-        "outtmpl": out_tmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
-        "concurrent_fragment_downloads": 8,
-        "abort_on_unavailable_fragments": True,
-        "max_downloads": 1,
-        "http_chunk_size": 10485760,
-        "buffersize": 1024 * 1024,
-        "updatetime": False,
-        "progress_hooks": [progress_hook],
-        "http_headers": headers,
-        **ydl_opts_cookies,
-    }
-    if ffmpeg_dir:
-        ydl_opts["ffmpeg_location"] = ffmpeg_dir
-
-    format_id = options.get("format_id")
-    if media_type == "audio":
-        ydl_opts["format"] = "bestaudio/best"
-        ydl_opts["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "320",
-            }
+    output = _find_output(result)
+    if output is None:
+        # Cadangan: file hasil dengan nama job, bukan file per-format (.fNNN.) atau parsial.
+        candidates = [
+            p
+            for p in temp_dir.glob(f"{job_id.hex}_ytdlp.*")
+            if not p.name.endswith((".part", ".ytdl", ".temp"))
+            and ".part-" not in p.name
+            and not _FORMAT_PART.fullmatch(p.suffixes[0] if p.suffixes else "")
         ]
-    else:
-        ydl_opts["format"] = format_id if format_id else "bestvideo+bestaudio/best"
-        ydl_opts["merge_output_format"] = "mp4"
+        output = max(candidates, key=lambda p: p.stat().st_size) if candidates else None
+    if output is None:
+        raise AppError("download_failed", "File hasil unduhan tidak ditemukan di penyimpanan sementara.", 500)
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([clean_url])
-    except yt_dlp.utils.MaxDownloadsReached:
-        log.info("yt-dlp batas max_downloads tercapai (unduhan selesai): %s", job_id)
-    except yt_dlp.utils.DownloadError as exc:
-        clean_msg = str(exc).split("ERROR:")[-1].strip()
-        raise AppError("download_failed", f"Gagal mengunduh media dari platform: {clean_msg}", 502) from exc
-    except yt_dlp.utils.YoutubeDLError as exc:
-        clean_msg = str(exc).split("ERROR:")[-1].strip()
-        raise AppError("download_failed", f"Gagal mengunduh media dari platform: {clean_msg}", 502) from exc
-    finally:
-        if cookie_file and os.path.exists(cookie_file):
-            try:
-                os.remove(cookie_file)
-            except OSError:
-                pass
-
-    candidates = [
-        p
-        for p in tmp_path.parent.glob(f"{job_id.hex}_ytdlp.*")
-        if not p.name.endswith((".part", ".ytdl", ".temp")) and ".part-" not in p.name
-    ]
-    if not candidates:
-        raise AppError("download_failed", "File unduhan tidak ditemukan di penyimpanan sementara.", 500)
-
-    res_file = max(candidates, key=lambda p: p.stat().st_size)
-    if tmp_path.exists():
-        tmp_path.unlink()
-    res_file.replace(tmp_path)
-
-    for leftover in tmp_path.parent.glob(f"{job_id.hex}_ytdlp.*"):
+    size = output.stat().st_size
+    if size > control.max_bytes:
+        raise _Stopped("too_large")
+    output.replace(tmp_path)
+    for leftover in temp_dir.glob(f"{job_id.hex}_ytdlp*"):
         try:
             leftover.unlink(missing_ok=True)
         except OSError:
-            pass
-
-    size = tmp_path.stat().st_size
-    head = tmp_path.read_bytes()[:SNIFF_BYTES]
+            log.debug("gagal menghapus sisa yt-dlp %s", leftover.name)
+    with tmp_path.open("rb") as fh:  # H-04: cukup 4 KB untuk deteksi tipe
+        head = fh.read(SNIFF_BYTES)
     return head, size
+
+
+async def _report_progress(
+    sessions: SessionFactory, job_id: uuid.UUID, downloaded: int, total: int | None
+) -> str | None:
+    """Mencatat progres yt-dlp. Mengembalikan status job terkini (None bila job dihapus).
+
+    Status akhir/jeda/batal tidak pernah ditimpa, sehingga job yang ditandai gagal oleh
+    pembersihan otomatis atau dijeda pengguna tidak "hidup lagi".
+    """
+    async with sessions() as s:
+        job = await s.get(DownloadJob, job_id)
+        if job is None:
+            return None
+        if job.status in (*TERMINAL_STATUSES, *INTERRUPT_STATUSES):
+            return job.status
+        job.status = "downloading"
+        job.size_downloaded = downloaded
+        if total and total > 0:
+            job.size_total = int(total)
+        await s.commit()
+        return job.status
+
+
+# ---------------------------------------------------------------------------------------------
+# HTTP langsung
+# ---------------------------------------------------------------------------------------------
 
 
 def _size_limit(media_type: str, settings: Settings) -> tuple[int, str]:
     if media_type == "subtitle":
         return min(settings.max_subtitle_bytes, settings.max_download_bytes), f"{settings.max_subtitle_size_mb} MB"
     return settings.max_download_bytes, f"{settings.max_download_size_mb} MB"
+
+
+def _content_range(value: str | None) -> tuple[int, int | None] | None:
+    """`bytes START-END/TOTAL` → (START, TOTAL)."""
+    if not value or not value.startswith("bytes "):
+        return None
+    try:
+        span, _, total = value[6:].partition("/")
+        start = int(span.split("-", 1)[0])
+        return start, (int(total) if total.isdigit() else None)
+    except ValueError:
+        return None
 
 
 async def _stream_to_file(
@@ -345,31 +532,52 @@ async def _stream_to_file(
         headers["Referer"] = referer
     if custom_headers:
         headers.update(custom_headers)
-    if cookies:
-        headers["Cookie"] = cookies
+    # Lanjutkan unduhan yang dijeda: minta sisa file dengan Range.
+    offset = await asyncio.to_thread(lambda: tmp_path.stat().st_size if tmp_path.exists() else 0)
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    jar = parse_cookies(cookies, referer or url)
+
     async with (
         build_client(settings) as client,
-        open_stream(client, url, settings, headers=headers) as (resp, _final),
+        open_stream(client, url, settings, headers=headers, cookies=jar) as (resp, _final),
     ):
+        if resp.status_code == 416 and offset:
+            # Server menolak Range: file parsial dianggap tidak valid, ulang dari awal.
+            await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
+            raise TransientError("Unduhan lanjutan ditolak server; diulang dari awal.", code="resume_rejected")
         if resp.status_code >= 400:
             raise status_error(resp.status_code, subject="File")
-        length = resp.headers.get("content-length")
-        # Content-Length dari respons terkompresi bukan ukuran file sebenarnya.
-        total = int(length) if length and length.isdigit() and not is_encoded(resp) else None
+
+        resumed = False
+        total: int | None = None
+        if offset and resp.status_code == 206:
+            cr = _content_range(resp.headers.get("content-range"))
+            if cr and cr[0] == offset:
+                resumed, total = True, cr[1]
+        if not resumed:
+            offset = 0
+            length = resp.headers.get("content-length")
+            # Content-Length dari respons terkompresi bukan ukuran file sebenarnya.
+            total = int(length) if length and length.isdigit() and not is_encoded(resp) else None
         if total is not None and total > max_bytes:
             raise AppError(
                 "file_too_large",
                 f"Ukuran file ({total / 1_048_576:.1f} MB) melebihi batas {limit_label}.",
                 413,
             )
-        await _check_storage_capacity(sessions, settings, incoming=total, exclude=tmp_path)
-        await _update(sessions, job_id, status="downloading", size_total=total, size_downloaded=0)
+        await check_storage_capacity(
+            sessions, settings, incoming=(total - offset) if total is not None else None, exclude=tmp_path
+        )
+        await _update(sessions, job_id, status="downloading", size_total=total, size_downloaded=offset)
 
-        written = 0
+        written = offset
         head = b""
+        if resumed:
+            head = await asyncio.to_thread(_read_head, tmp_path)
         buffer = bytearray()
         last_report = time.monotonic()
-        fh = await asyncio.to_thread(tmp_path.open, "wb")
+        fh = await asyncio.to_thread(tmp_path.open, "ab" if resumed else "wb")
         try:
             async for chunk in iter_body(resp, CHUNK):
                 written += len(chunk)
@@ -383,7 +591,14 @@ async def _stream_to_file(
                     buffer.clear()
                 if time.monotonic() - last_report >= PROGRESS_INTERVAL:
                     last_report = time.monotonic()
-                    await _update(sessions, job_id, size_downloaded=written)
+                    try:
+                        await _update(sessions, job_id, size_downloaded=written)
+                    except JobInterrupted:
+                        # Simpan yang sudah diterima agar bisa dilanjutkan.
+                        if buffer:
+                            await asyncio.to_thread(fh.write, bytes(buffer))
+                            buffer.clear()
+                        raise
             if buffer:
                 await asyncio.to_thread(fh.write, bytes(buffer))
         finally:
@@ -395,6 +610,16 @@ async def _stream_to_file(
             raise TransientError("Unduhan terputus sebelum file lengkap.", code="incomplete")
         await _update(sessions, job_id, size_downloaded=written, size_total=written)
         return head, written
+
+
+def _read_head(path: Path) -> bytes:
+    with path.open("rb") as fh:
+        return fh.read(SNIFF_BYTES)
+
+
+# ---------------------------------------------------------------------------------------------
+# Finalisasi
+# ---------------------------------------------------------------------------------------------
 
 
 async def _finalize(
@@ -429,7 +654,7 @@ async def _finalize(
     now = utcnow()
     async with sessions() as s:
         job = await s.get(DownloadJob, job_id)
-        if job is None:  # dihapus saat berjalan
+        if job is None or job.status == "cancelled":  # dihapus/dibatalkan saat berjalan
             await asyncio.to_thread(final_path.unlink, missing_ok=True)
             return
         if job.file is not None:
@@ -451,8 +676,10 @@ async def _finalize(
         job.size_downloaded = size
         job.size_total = size
         job.error_message = None
-        # URL tidak lagi dibutuhkan setelah selesai; buang query string yang bisa berisi token (PRD §11).
+        # URL dan kredensial tidak lagi dibutuhkan setelah selesai; buang query string yang bisa
+        # berisi token (PRD §11) dan cookie/header pengguna (H-02).
         job.media_url = redact_url(job.media_url)
+        job.options = strip_secrets(job.options)
         s.add(DownloadHistory(job_id=job_id, action="completed", details={"size": size, "mime": mime}))
         await s.commit()
     log.info("download %s selesai (%s bytes)", job_id, size)
@@ -517,7 +744,7 @@ def _temp_usage(folder: Path, exclude: Path | None) -> int:
     return total
 
 
-async def _check_storage_capacity(
+async def check_storage_capacity(
     sessions: SessionFactory, settings: Settings, incoming: int | None, exclude: Path | None
 ) -> None:
     """Kuota mencakup file selesai di database dan unduhan lain yang sedang berjalan di temp/."""
@@ -543,10 +770,13 @@ def _storage_error(exc: OSError) -> AppError:
 
 
 async def _update(sessions: SessionFactory, job_id: uuid.UUID, **fields: object) -> None:
+    """Memperbarui job yang sedang berjalan; berhenti bila pengguna menjeda/membatalkannya."""
     async with sessions() as s:
         job = await s.get(DownloadJob, job_id)
         if job is None:
             raise AppError("job_deleted", "Pekerjaan dihapus saat berjalan.", 410)
+        if job.status in INTERRUPT_STATUSES:
+            raise JobInterrupted(job.status)
         for key, value in fields.items():
             setattr(job, key, value)
         await s.commit()
@@ -561,7 +791,7 @@ async def _event(sessions: SessionFactory, job_id: uuid.UUID, action: str, detai
 async def _fail(sessions: SessionFactory, job_id: uuid.UUID, message: str) -> None:
     async with sessions() as s:
         job = await s.get(DownloadJob, job_id)
-        if job is None:
+        if job is None or job.status in INTERRUPT_STATUSES:
             return
         job.status = "failed"
         job.error_message = message
