@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     read_timeout_seconds: float = 30.0
     max_page_size_mb: float = 5.0
     max_redirects: int = 5
+    enable_dynamic_rendering: bool = True
+    dynamic_render_timeout_seconds: float = 12.0
     max_media_items: int = 500
     probe_limit: int = 80
     probe_concurrency: int = 4

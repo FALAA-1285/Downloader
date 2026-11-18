@@ -87,6 +87,48 @@ class GenericAdapter(Adapter):
         if needs_javascript(page, words):
             warnings.append("Halaman tampaknya dimuat dengan JavaScript; sebagian konten mungkin tidak terdeteksi.")
 
+        has_video = any(m.type == "video" for m in media)
+        has_subtitle = any(m.type == "subtitle" for m in media)
+        is_streaming_spa = bool(
+            page.soup.find(id=re.compile(r"^(root|app|__next|__nuxt)$"))
+            or "self.__next_f" in page.html
+            or needs_javascript(page, words)
+            or any(s in final_url.lower() for s in ("idlix", "lk21", "layarkaca"))
+        )
+
+        if settings.enable_dynamic_rendering and is_streaming_spa and (not has_video or not has_subtitle):
+            try:
+                from app.extractors.dynamic import render_and_sniff
+
+                r_html, intercepted, dyn_warnings = await render_and_sniff(
+                    final_url,
+                    settings,
+                    wants_video=ctx.wants("video"),
+                    wants_subtitles=ctx.wants("subtitle"),
+                )
+                warnings.extend(dyn_warnings)
+
+                existing_urls = {m.url for m in media}
+                for c in intercepted:
+                    if c.url not in existing_urls:
+                        media.append(c)
+                        existing_urls.add(c.url)
+
+                if r_html:
+                    _, r_media, r_warn, _, _ = await asyncio.to_thread(
+                        self._extract, r_html.encode("utf-8", "ignore"), final_url, "utf-8", ctx
+                    )
+                    for c in r_media:
+                        if c.url not in existing_urls:
+                            media.append(c)
+                            existing_urls.add(c.url)
+                    warnings.extend(r_warn)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"Dynamic renderer tidak dapat dijalankan: {exc}")
+
+            has_video = any(m.type == "video" for m in media)
+            has_subtitle = any(m.type == "subtitle" for m in media)
+
         if len(media) > settings.max_media_items:
             warnings.append(f"Ditemukan {len(media)} media; hanya {settings.max_media_items} pertama yang ditampilkan.")
             media = media[: settings.max_media_items]
@@ -96,8 +138,6 @@ class GenericAdapter(Adapter):
         if ctx.wants("text") and not text:
             warnings.append("Teks utama tidak terdeteksi pada halaman ini.")
 
-        has_video = any(m.type == "video" for m in media)
-        has_subtitle = any(m.type == "subtitle" for m in media)
         url_path = (urlsplit(final_url).path or "").strip("/")
         if ctx.wants("video") and not has_video and (url_path in ("", "index", "home") or len(media) > 50):
             warnings.append(
@@ -105,11 +145,6 @@ class GenericAdapter(Adapter):
                 "Untuk mengunduh video, buka judul film yang diinginkan lalu salin URL halaman film spesifik tersebut."
             )
 
-        is_streaming_spa = bool(
-            page.soup.find(id=re.compile(r"^(root|app|__next|__nuxt)$"))
-            or "self.__next_f" in page.html
-            or any(s in final_url.lower() for s in ("idlix", "lk21", "layarkaca"))
-        )
         if is_streaming_spa and (not has_video or not has_subtitle):
             warnings.append(
                 "Situs ini memuat pemutar video/subtitle secara terenkripsi via JavaScript sisi klien (SPA/Next.js). "
