@@ -17,11 +17,17 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Install Chromium dan pustaka sistem untuk fitur Playwright dynamic rendering & sniffer
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN /opt/venv/bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 RUN useradd --create-home --uid 10001 app \
     && mkdir -p /app/storage/downloads /app/storage/temp \
-    && chown -R app:app /app/storage
+    && chown -R app:app /app/storage \
+    && chown -R app:app /opt/playwright
 USER app
 
 EXPOSE 8000
