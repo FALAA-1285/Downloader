@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     storage_path: Path = Path("../storage")
     max_download_size_mb: int = 1024
     max_subtitle_size_mb: int = 5
+    max_video_duration_minutes: int = 180
     max_storage_mb: int = 10240
     download_timeout_seconds: int = 600
     download_max_retries: int = 2

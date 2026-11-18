@@ -33,3 +33,14 @@ frontend/.next/
 *.part*
 *.ytdl
 
+# Temporary, scratch, & log files
+scratch*
+*.scratch.*
+.tmp/
+frontend/.tmp/
+*.log
+
+# OS metadata
+.DS_Store
+Thumbs.db
+

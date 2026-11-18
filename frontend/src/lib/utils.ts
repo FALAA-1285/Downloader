@@ -34,9 +34,13 @@ export function formatBytes(bytes: number | null | undefined): string {
 }
 
 export function formatDuration(seconds: number | null | undefined): string {
-  if (seconds == null) return "—";
-  const m = Math.floor(seconds / 60);
+  if (seconds == null || isNaN(seconds) || seconds <= 0) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
   const s = Math.round(seconds % 60);
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
@@ -77,7 +81,33 @@ export const STATUS_LABEL: Record<JobStatus, string> = {
   failed: "Gagal",
 };
 
-export function extFromName(name: string): string {
-  const m = /\.([a-z0-9]{1,5})$/i.exec(name);
-  return m ? m[1].toUpperCase() : "—";
+export function extFromName(
+  name?: string | null,
+  mimeType?: string | null,
+  type?: string | null
+): string {
+  if (name) {
+    const m = /\.([a-z0-9]{1,5})$/i.exec(name);
+    if (m) return m[1].toUpperCase();
+  }
+  if (mimeType) {
+    const mt = mimeType.toLowerCase();
+    if (mt.includes("mp4")) return "MP4";
+    if (mt.includes("webm")) return "WEBM";
+    if (mt.includes("mpegurl") || mt.includes("m3u8")) return "HLS";
+    if (mt.includes("dash") || mt.includes("mpd")) return "DASH";
+    if (mt.includes("mpeg") || mt.includes("mp3")) return "MP3";
+    if (mt.includes("ogg")) return "OGG";
+    if (mt.includes("wav")) return "WAV";
+    if (mt.includes("jpeg") || mt.includes("jpg")) return "JPG";
+    if (mt.includes("png")) return "PNG";
+    if (mt.includes("webp")) return "WEBP";
+    if (mt.includes("vtt")) return "VTT";
+    if (mt.includes("subrip") || mt.includes("srt")) return "SRT";
+  }
+  if (type === "video") return "MP4";
+  if (type === "audio") return "MP3";
+  if (type === "image") return "JPG";
+  if (type === "subtitle") return "VTT";
+  return "—";
 }

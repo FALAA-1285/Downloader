@@ -137,8 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         first = exc.errors()[0] if exc.errors() else {}
         loc = [str(p) for p in first.get("loc", []) if p not in ("body", "query", "path")]
         field = FIELD_LABELS.get(loc[0], loc[0]) if loc else "permintaan"
-        msg = first.get("msg")
-        detail = f"Nilai {field} tidak valid ({msg})." if msg and "Value error" not in msg else f"Nilai {field} tidak valid."
+        msg = first.get("msg") or ""
+        clean_msg = msg.replace("Value error, ", "").strip()
+        detail = f"Nilai {field} tidak valid ({clean_msg})." if clean_msg else f"Nilai {field} tidak valid."
         return _error(422, "invalid_request", detail)
 
     @app.exception_handler(Exception)

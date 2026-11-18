@@ -103,3 +103,92 @@ def test_filename_sanitized():
     assert sanitize_filename("../../etc/passwd") == "passwd"
     assert sanitize_filename("foto asli (1).JPG") == "foto-asli-1.JPG"
     assert sanitize_filename("%2e%2e%2fsecret.txt") == "secret.txt"
+
+
+def test_ldjson_video_and_subtitle_extraction():
+    html = """<!doctype html><html><head>
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "Movie",
+        "name": "Sample Movie",
+        "trailer": {
+            "@type": "VideoObject",
+            "name": "Official Trailer",
+            "embedUrl": "https://www.youtube.com/watch?v=sample123",
+            "thumbnailUrl": "https://img.example/thumb.jpg"
+        },
+        "video": {
+            "@type": "VideoObject",
+            "contentUrl": "https://stream.example/direct-video.mp4",
+            "subtitles": [
+                {
+                    "@type": "Subtitle",
+                    "src": "https://stream.example/id.vtt",
+                    "language": "id"
+                }
+            ]
+        }
+    }
+    </script>
+    </head><body><p>Deskripsi film...</p></body></html>"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    base = "https://example.com/movie/test"
+    items, _ = extract_av(soup, base)
+    urls = [c.url for c in items]
+    assert "https://www.youtube.com/watch?v=sample123" in urls
+    assert "https://stream.example/direct-video.mp4" in urls
+    
+    subs = extract_subtitles(soup, base)
+    sub_urls = [s.url for s in subs]
+    assert "https://stream.example/id.vtt" in sub_urls
+
+
+def test_parse_duration_and_filename_extension():
+    from app.extractors.common import parse_duration, filename_from_url, Candidate
+
+    assert parse_duration("PT137M") == 8220.0
+    assert parse_duration("PT2H17M") == 8220.0
+    assert parse_duration("PT1H30M15S") == 5415.0
+    assert parse_duration("PT90S") == 90.0
+    assert parse_duration("02:17:00") == 8220.0
+    assert parse_duration("8220") == 8220.0
+    assert parse_duration(None) is None
+
+    # Embed URL without extension receives .mp4
+    c = Candidate(type="video", url="https://cloudemb.com/embed/xyz123", label="Cloudemb Player Video")
+    assert c.filename == "Cloudemb-Player-Video.mp4"
+    assert c.mime_type == "video/mp4"
+
+    # Direct filename with extension is preserved
+    assert filename_from_url("https://example.com/movie.mp4", "video") == "movie.mp4"
+
+
+def test_ldjson_duration_extraction():
+    html = """<!doctype html><html><head>
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "Movie",
+        "name": "Clockwork Orange",
+        "duration": "PT137M",
+        "trailer": {
+            "@type": "VideoObject",
+            "name": "Official Trailer",
+            "embedUrl": "https://www.youtube.com/watch?v=sample123"
+        }
+    }
+    </script>
+    </head><body><iframe src="https://cloudemb.com/embed/xyz123"></iframe></body></html>"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    base = "https://example.com/movie/test"
+    items, _ = extract_av(soup, base)
+    assert len(items) == 2
+    for item in items:
+        # Durasi film hanya untuk pemutar film; trailer tidak mewarisi durasi film.
+        expected = None if "youtube" in item.url else 8220.0
+        assert item.duration == expected
+        assert item.filename.endswith(".mp4")
+        assert item.mime_type == "video/mp4"

@@ -89,6 +89,8 @@ export interface ServerConfig {
   storage_path: string;
   version: string;
   queue_backend?: string;
+  yt_dlp_version?: string;
+  ffmpeg_version?: string;
 }
 
 export class ApiError extends Error {

@@ -74,7 +74,7 @@ function ImageCard({ item, checked, onToggle }: { item: MediaItem; checked: bool
             />
           </span>
           <span className="absolute right-2.5 top-2.5 rounded-md bg-bg/90 px-1.5 py-0.5 text-[11px] font-medium text-ink-2 backdrop-blur">
-            {extFromName(item.filename)}
+            {extFromName(item.filename, item.mime_type, item.type)}
           </span>
         </div>
         <div className="px-3 py-2.5">

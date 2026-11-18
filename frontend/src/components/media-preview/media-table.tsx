@@ -107,7 +107,7 @@ function Row({ item, checked, onToggle }: { item: MediaItem; checked: boolean; o
         </label>
       </TableCell>
       <TableCell className="text-ink-2">
-        {extFromName(item.filename)}
+        {extFromName(item.filename, item.mime_type, item.type)}
         {item.height ? <span className="text-muted-foreground"> · {item.height}p</span> : null}
       </TableCell>
       <TableCell className="tabular-nums text-ink-2">

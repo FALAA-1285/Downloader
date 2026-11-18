@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from typing import Any
 
@@ -46,10 +47,21 @@ async def extract_social_media(url: str, ctx: AnalysisContext, platform_name: st
     if not info:
         raise AppError("empty_result", f"Tidak ada media yang ditemukan dari {platform_name}.", 422)
 
+    if info.get("is_live") or info.get("live_status") == "is_live":
+        raise AppError("livestream_unsupported", "Siaran langsung (live stream) tidak dapat diunduh.", 422)
+
+    duration = info.get("duration")
+    max_duration_seconds = ctx.settings.max_video_duration_minutes * 60
+    if duration and duration > max_duration_seconds:
+        raise AppError(
+            "duration_limit_exceeded",
+            f"Durasi video ({int(duration // 60)} menit) melebihi batas maksimum {ctx.settings.max_video_duration_minutes} menit yang diizinkan.",
+            422,
+        )
+
     title = info.get("title") or f"Video {platform_name}"
     description = info.get("description")
     thumbnail = info.get("thumbnail")
-    duration = info.get("duration")
     final_url = info.get("webpage_url") or url
 
     clean_title = sanitize_filename(title, fallback="video")
@@ -292,10 +304,11 @@ _ALL_YTDLP_EXTRACTORS: list[Any] | None = None
 def _get_ytdlp_extractors() -> list[Any]:
     global _ALL_YTDLP_EXTRACTORS
     if _ALL_YTDLP_EXTRACTORS is None:
-        _ALL_YTDLP_EXTRACTORS = yt_dlp.extractor.gen_extractors()
+        _ALL_YTDLP_EXTRACTORS = list(yt_dlp.extractor.gen_extractors())
     return _ALL_YTDLP_EXTRACTORS
 
 
+@functools.lru_cache(maxsize=1024)
 def is_ytdlp_supported(url: str) -> tuple[bool, str | None]:
     """Cek apakah URL didukung oleh salah satu dari 1.800+ extractor bawaan yt-dlp."""
     try:

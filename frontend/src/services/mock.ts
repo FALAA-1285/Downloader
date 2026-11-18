@@ -206,4 +206,7 @@ export const MOCK_CONFIG: ServerConfig = {
   file_retention_hours: 24,
   storage_path: "/app/storage",
   version: "0.1.0",
+  queue_backend: "inline",
+  yt_dlp_version: "2026.10.26",
+  ffmpeg_version: "7.1",
 };

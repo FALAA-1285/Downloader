@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from urllib.parse import urlsplit
 
 from app.core.errors import AppError
 from app.core.http_client import open_stream, read_limited, status_error
@@ -93,6 +95,27 @@ class GenericAdapter(Adapter):
 
         if ctx.wants("text") and not text:
             warnings.append("Teks utama tidak terdeteksi pada halaman ini.")
+
+        has_video = any(m.type == "video" for m in media)
+        has_subtitle = any(m.type == "subtitle" for m in media)
+        url_path = (urlsplit(final_url).path or "").strip("/")
+        if ctx.wants("video") and not has_video and (url_path in ("", "index", "home") or len(media) > 50):
+            warnings.append(
+                "Halaman ini tampaknya merupakan beranda atau katalog daftar konten (bukan halaman pemutar film). "
+                "Untuk mengunduh video, buka judul film yang diinginkan lalu salin URL halaman film spesifik tersebut."
+            )
+
+        is_streaming_spa = bool(
+            page.soup.find(id=re.compile(r"^(root|app|__next|__nuxt)$"))
+            or "self.__next_f" in page.html
+            or any(s in final_url.lower() for s in ("idlix", "lk21", "layarkaca"))
+        )
+        if is_streaming_spa and (not has_video or not has_subtitle):
+            warnings.append(
+                "Situs ini memuat pemutar video/subtitle secara terenkripsi via JavaScript sisi klien (SPA/Next.js). "
+                "Jika video film penuh atau subtitle tidak muncul, putar film di browser lalu salin tautan direct stream (.m3u8) "
+                "atau subtitle (.vtt) langsung dari tab Network pada Developer Tools (F12)."
+            )
 
         return AnalysisOutcome(
             final_url=final_url,

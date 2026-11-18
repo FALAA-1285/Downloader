@@ -155,7 +155,7 @@ function AnalyzeRun({ url, types, onRetry }: { url: string; types: MediaType[]; 
       return (
         <EmptyState icon={<TypeIcon type={t} className="size-5" />} title={`Tidak ada ${MEDIA_LABEL[t].toLowerCase()} ditemukan`}>
           {t === "video"
-            ? "Tidak ada elemen video atau tautan file video langsung yang dapat diakses di halaman ini."
+            ? "Tidak ada elemen video atau tautan file video langsung di halaman ini. Catatan: Jika URL yang dimasukkan adalah halaman beranda atau katalog daftar film, silakan buka film yang diinginkan lalu salin URL halaman pemutar film spesifik tersebut."
             : t === "subtitle"
               ? "Tidak ada elemen track atau file subtitle yang tersedia secara terbuka."
               : t === "audio"

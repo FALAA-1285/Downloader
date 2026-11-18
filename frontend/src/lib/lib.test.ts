@@ -39,6 +39,9 @@ describe("utils", () => {
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(5 * 1024 * 1024)).toBe("5.0 MB");
     expect(formatDuration(94)).toBe("1:34");
+    expect(formatDuration(8220)).toBe("2:17:00");
     expect(extFromName("foto.webp")).toBe("WEBP");
+    expect(extFromName("video-stream", "video/mp4")).toBe("MP4");
+    expect(extFromName("player", null, "video")).toBe("MP4");
   });
 });

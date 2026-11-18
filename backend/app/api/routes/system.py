@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import functools
+import shutil
+import subprocess
+
+import yt_dlp.version
 from fastapi import APIRouter, Request
 from sqlalchemy import text
 
@@ -8,6 +13,25 @@ from app.core.config import APP_VERSION
 from app.schemas.api import AdapterOut, ConfigOut, HealthOut
 
 router = APIRouter(tags=["system"])
+
+
+@functools.lru_cache(maxsize=1)
+def _get_ffmpeg_version() -> str | None:
+    bin_path = shutil.which("ffmpeg")
+    if not bin_path:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [bin_path, "-version"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        line = proc.stdout.splitlines()[0] if proc.stdout else ""
+        return line.split("version")[-1].strip().split()[0] if "version" in line else line.strip()
+    except Exception:  # noqa: BLE001
+        return "terpasang"
 
 
 @router.get("/health", response_model=HealthOut)
@@ -46,4 +70,6 @@ async def config(settings: SettingsDep, request: Request) -> ConfigOut:
         storage_path=str(settings.storage_path),
         version=APP_VERSION,
         queue_backend=request.app.state.queue.name,
+        yt_dlp_version=getattr(yt_dlp.version, "__version__", None),
+        ffmpeg_version=_get_ffmpeg_version(),
     )

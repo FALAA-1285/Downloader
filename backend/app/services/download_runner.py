@@ -141,7 +141,7 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
                         job_id, media_url, media_type, tmp_path, sessions, settings, referer=source_url
                     )
             except AppError as exc:
-                if exc.status_code in (401, 403) and media_type in ("video", "audio"):
+                if (exc.status_code in (401, 403) or exc.code in ("forbidden", "auth_required")) and media_type in ("video", "audio"):
                     log.info("direct stream %s gagal (%s), beralih ke yt-dlp", media_url, exc.message)
                     loop = asyncio.get_running_loop()
                     head, size = await asyncio.to_thread(
@@ -219,6 +219,8 @@ def _download_ytdlp_sync(
         "retries": 5,
         "fragment_retries": 5,
         "concurrent_fragment_downloads": 8,
+        "abort_on_unavailable_fragments": True,
+        "max_downloads": 1,
         "http_chunk_size": 10485760,
         "buffersize": 1024 * 1024,
         "updatetime": False,
@@ -245,18 +247,33 @@ def _download_ytdlp_sync(
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([clean_url])
+    except yt_dlp.utils.MaxDownloadsReached:
+        log.info("yt-dlp batas max_downloads tercapai (unduhan selesai): %s", job_id)
     except yt_dlp.utils.DownloadError as exc:
         clean_msg = str(exc).split("ERROR:")[-1].strip()
         raise AppError("download_failed", f"Gagal mengunduh media dari platform: {clean_msg}", 502) from exc
+    except yt_dlp.utils.YoutubeDLError as exc:
+        clean_msg = str(exc).split("ERROR:")[-1].strip()
+        raise AppError("download_failed", f"Gagal mengunduh media dari platform: {clean_msg}", 502) from exc
 
-    candidates = list(tmp_path.parent.glob(f"{job_id.hex}_ytdlp.*"))
+    candidates = [
+        p
+        for p in tmp_path.parent.glob(f"{job_id.hex}_ytdlp.*")
+        if not p.name.endswith((".part", ".ytdl", ".temp")) and ".part-" not in p.name
+    ]
     if not candidates:
         raise AppError("download_failed", "File unduhan tidak ditemukan di penyimpanan sementara.", 500)
 
-    res_file = candidates[0]
+    res_file = max(candidates, key=lambda p: p.stat().st_size)
     if tmp_path.exists():
         tmp_path.unlink()
     res_file.replace(tmp_path)
+
+    for leftover in tmp_path.parent.glob(f"{job_id.hex}_ytdlp.*"):
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     size = tmp_path.stat().st_size
     head = tmp_path.read_bytes()[:SNIFF_BYTES]

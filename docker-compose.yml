@@ -5,6 +5,8 @@
 
 x-backend: &backend
   build: ./backend
+  mem_limit: 2048m
+  cpus: "2.0"
   env_file: .env
   environment:
     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?isi POSTGRES_USER di .env}:${POSTGRES_PASSWORD:?isi POSTGRES_PASSWORD di .env}@postgres:5432/${POSTGRES_DB:?isi POSTGRES_DB di .env}

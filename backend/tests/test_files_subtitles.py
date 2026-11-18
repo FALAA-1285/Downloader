@@ -79,3 +79,45 @@ def test_invalid_subtitle_rejected():
     with pytest.raises(AppError):
         validate_subtitle(b"WEBVTT\n\nbukan cue\n", "vtt")
     assert validate_subtitle(SRT, "srt")
+
+
+def test_download_ytdlp_sync_handles_max_downloads_reached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import uuid
+    from unittest.mock import MagicMock
+    import yt_dlp
+    import yt_dlp.utils
+    from app.services.download_runner import _download_ytdlp_sync
+
+    job_id = uuid.uuid4()
+    part_path = tmp_path / f"{job_id.hex}.part"
+
+    # Buat file hasil unduhan seolah-olah yt-dlp sudah selesai mengunduh
+    target_file = tmp_path / f"{job_id.hex}_ytdlp.mp4"
+    target_file.write_bytes(MP4)
+    ytdl_file = tmp_path / f"{job_id.hex}_ytdlp.mp4.ytdl"
+    ytdl_file.write_bytes(b"temp_ytdl_metadata")
+    frag_file = tmp_path / f"{job_id.hex}_ytdlp.mp4.part-Frag1"
+    frag_file.write_bytes(b"temp_frag")
+
+    def mock_download(self, urls):
+        raise yt_dlp.utils.MaxDownloadsReached()
+
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "download", mock_download)
+
+    head, size = _download_ytdlp_sync(
+        "https://example.com/video",
+        "video",
+        part_path,
+        {},
+        job_id,
+        MagicMock(),
+        MagicMock(),
+    )
+
+    assert head.startswith(b"\x00\x00\x00\x18ftypmp42")
+    assert size == len(MP4)
+    assert part_path.exists()
+    assert not target_file.exists()
+    assert not ytdl_file.exists()
+    assert not frag_file.exists()
+

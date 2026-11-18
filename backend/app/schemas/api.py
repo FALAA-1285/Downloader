@@ -82,7 +82,7 @@ class AnalysisJob(BaseModel):
 
 class CreateDownloadsRequest(BaseModel):
     analysis_id: uuid.UUID
-    media_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(
+    media_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=256)]] = Field(
         min_length=1, max_length=500
     )
     subtitle_format: Literal["original", "srt"] = "original"
@@ -124,6 +124,8 @@ class ConfigOut(BaseModel):
     storage_path: str
     version: str
     queue_backend: str
+    yt_dlp_version: str | None = None
+    ffmpeg_version: str | None = None
 
 
 class HealthOut(BaseModel):

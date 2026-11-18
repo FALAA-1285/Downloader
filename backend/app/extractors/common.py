@@ -72,6 +72,13 @@ class Candidate:
     probe: bool = True
     options: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        if not self.mime_type:
+            ext = url_ext(self.url)
+            self.mime_type = mime_from_ext(ext) or (
+                "video/mp4" if self.type == "video" else ("audio/mpeg" if self.type == "audio" else None)
+            )
+
     @property
     def id(self) -> str:
         digest = hashlib.sha1(f"{self.type}|{self.url}".encode(), usedforsecurity=False).hexdigest()[:12]
@@ -122,11 +129,61 @@ def sanitize_filename(name: str, fallback: str = "file") -> str:
 
 
 def filename_from_url(url: str, media_type: str, label: str | None = None) -> str:
+    clean_label = sanitize_filename(label or "", fallback="")
     base = posixpath.basename(urlsplit(url).path)
     name = sanitize_filename(base, fallback="")
-    if not name or name in {"-", "index"}:
-        name = sanitize_filename(label or "", fallback="") or media_type
+    generic_names = {"-", "index", "0.m3u8", "0", "player", "embed", "watch", "video", "play", "stream"}
+    if not name or name.lower() in generic_names or (clean_label and "." not in name):
+        if clean_label:
+            ext = ".mp4" if media_type == "video" else (".mp3" if media_type == "audio" else (".vtt" if media_type == "subtitle" else ""))
+            name = clean_label if "." in clean_label else f"{clean_label}{ext}"
+        else:
+            name = media_type
+
+    if "." not in name:
+        default_ext = {
+            "video": ".mp4",
+            "audio": ".mp3",
+            "image": ".jpg",
+            "subtitle": ".vtt",
+        }.get(media_type, "")
+        name = f"{name}{default_ext}"
     return name
+
+
+def parse_duration(value: object) -> float | None:
+    """Konversi durasi (detik, ISO 8601 seperti PT137M / PT2H17M, atau jam:menit:detik) ke detik (float)."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    val_str = str(value).strip()
+    if not val_str:
+        return None
+    try:
+        sec = float(val_str)
+        return sec if sec > 0 else None
+    except ValueError:
+        pass
+    iso_match = re.match(
+        r"^P(?:(?P<days>\d+)D)?T?(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?$",
+        val_str,
+        re.I,
+    )
+    if iso_match:
+        parts = iso_match.groupdict()
+        days = float(parts.get("days") or 0)
+        hours = float(parts.get("hours") or 0)
+        minutes = float(parts.get("minutes") or 0)
+        seconds = float(parts.get("seconds") or 0)
+        total = days * 86400 + hours * 3600 + minutes * 60 + seconds
+        return total if total > 0 else None
+    clock_parts = val_str.split(":")
+    if len(clock_parts) in (2, 3) and all(p.isdigit() for p in clock_parts):
+        if len(clock_parts) == 2:
+            return float(int(clock_parts[0]) * 60 + int(clock_parts[1]))
+        return float(int(clock_parts[0]) * 3600 + int(clock_parts[1]) * 60 + int(clock_parts[2]))
+    return None
 
 
 def parse_int(value: object) -> int | None:

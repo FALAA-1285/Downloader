@@ -129,6 +129,15 @@ export function SettingsView() {
               <Field label="Batas waktu unduhan" value={`${config.download_timeout_seconds} detik`} hint="DOWNLOAD_TIMEOUT_SECONDS" />
               <Field label="Retensi file sementara" value={`${config.file_retention_hours} jam`} hint="FILE_RETENTION_HOURS" />
               <Field label="Lokasi penyimpanan" value={<code className="font-mono text-[13px]">{config.storage_path}</code>} hint="STORAGE_PATH" />
+              {config.queue_backend && (
+                <Field label="Backend Antrean" value={<span className="uppercase">{config.queue_backend}</span>} />
+              )}
+              {config.yt_dlp_version && (
+                <Field label="Versi yt-dlp" value={`v${config.yt_dlp_version}`} hint="Ekstraktor Media Sosial" />
+              )}
+              {config.ffmpeg_version && (
+                <Field label="Versi FFmpeg" value={config.ffmpeg_version} hint="Pengolah Video & Audio DASH" />
+              )}
             </>
           ) : (
             <p className="px-4 py-6 text-sm text-ink-2">{loadError ? "Konfigurasi server tidak dapat dimuat." : "Memuat konfigurasi…"}</p>
