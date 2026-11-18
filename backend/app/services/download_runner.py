@@ -44,7 +44,7 @@ from app.core.http_client import build_client, is_encoded, iter_body, open_strea
 from app.core.url_guard import redact_url, validate_url
 from app.downloaders.file_validator import Kind, resolve_kind
 from app.downloaders.subtitles import validate_subtitle, vtt_to_srt
-from app.downloaders.ytdlp_common import base_options, cookiefile, safe_headers
+from app.downloaders.ytdlp_common import base_options, cookiefile, login_message, needs_login, safe_headers
 from app.extractors.common import sanitize_filename
 from app.models.db import SessionFactory
 from app.models.models import TERMINAL_STATUSES, DownloadFile, DownloadHistory, DownloadJob, utcnow
@@ -457,6 +457,10 @@ def _download_ytdlp_sync(
             clean_msg = str(exc).split("ERROR:")[-1].strip()
             if "tunnel connection failed: 403" in clean_msg.lower():
                 raise AppError("unsafe_url", "Alamat media mengarah ke jaringan internal dan diblokir.", 422) from exc
+            if needs_login(clean_msg.lower()):
+                raise AppError(
+                    "login_required", login_message(source_url or clean_url, cookie_path is not None), 422
+                ) from exc
             raise AppError("download_failed", f"Gagal mengunduh media: {clean_msg[:300]}", 502) from exc
 
     output = _find_output(result)

@@ -12,7 +12,7 @@ from app.adapters.base import Adapter, AnalysisContext, AnalysisOutcome
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.guard_proxy import get_guard_proxy
-from app.downloaders.ytdlp_common import base_options, cookiefile, safe_headers
+from app.downloaders.ytdlp_common import base_options, cookiefile, login_message, needs_login, safe_headers
 from app.extractors.common import Candidate, sanitize_filename
 from app.extractors.ytdlp_support import is_ytdlp_supported  # noqa: F401 - diekspor ulang untuk registry/test
 
@@ -37,21 +37,19 @@ def _extract_slots(limit: int) -> threading.BoundedSemaphore:
         return _EXTRACT_SLOTS
 
 
-def _map_extract_error(exc: Exception) -> AppError:
+def _map_extract_error(exc: Exception, url: str = "", had_cookies: bool = False) -> AppError:
     msg = str(exc)
     low = msg.lower()
     if "tunnel connection failed: 403" in low or "proxyerror" in low or ("403 forbidden" in low and "proxy" in low):
         return AppError("unsafe_url", "Alamat media mengarah ke jaringan internal dan diblokir.", 422)
     if "private video" in low or "is private" in low:
         return AppError("private_video", "Video ini bersifat privat atau tidak dapat diakses.", 422)
+    if needs_login(low):
+        return AppError("login_required", login_message(url, had_cookies), 422)
     if "video unavailable" in low or "not found" in low or "http error 404" in low:
         return AppError("not_found", "Video tidak ditemukan atau telah dihapus.", 404)
-    if "sign in" in low or "login" in low or "log in" in low:
-        return AppError(
-            "login_required",
-            "Konten ini membutuhkan login atau dibatasi usia. Sertakan cookie sesi untuk domain ini.",
-            422,
-        )
+    if "no video could be found" in low or "no video formats found" in low:
+        return AppError("no_video", "Tidak ada video di tautan ini (mungkin hanya berisi teks atau gambar).", 422)
     clean_msg = msg.split("ERROR:")[-1].strip() if "ERROR:" in msg else msg
     return AppError("extract_failed", f"Gagal menganalisis video: {clean_msg[:300]}", 422)
 
@@ -79,7 +77,7 @@ def _ytdlp_extract_sync(
                 try:
                     return ydl.extract_info(url, download=False) or {}
                 except yt_dlp.utils.YoutubeDLError as exc:
-                    raise _map_extract_error(exc) from exc
+                    raise _map_extract_error(exc, url, had_cookies=cookie_path is not None) from exc
     finally:
         slots.release()
 

@@ -15,8 +15,41 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.core.cookies import NON_SENSITIVE_HEADERS, parse_cookies, to_netscape
+
+LOGIN_MARKERS = (
+    "sign in",
+    "login",
+    "log in",
+    "logged-in",
+    "logged in",
+    "--cookies",
+    "use cookies",
+    "empty media response",
+    "rate-limit reached or login required",
+    "requested content is not available",
+)
+
+
+def login_message(url: str, had_cookies: bool) -> str:
+    """Pesan yang bisa ditindaklanjuti saat platform meminta login (Instagram, Vimeo, dll.)."""
+    host = (urlsplit(url).hostname or "situs ini").removeprefix("www.").removeprefix("m.")
+    if had_cookies:
+        return (
+            f"{host} masih meminta login walau cookie sudah dikirim. Cookie mungkin kedaluwarsa atau "
+            f"bukan dari akun yang login: salin ulang cookie {host} (tombol “Salin cookies.txt” di ekstensi) "
+            "lalu simpan di Settings."
+        )
+    return (
+        f"{host} hanya menampilkan konten ini untuk pengguna yang login. Buka {host} di browser dalam keadaan "
+        f"login, tekan “Salin cookies.txt” di ekstensi UMD, lalu tempel di Settings → Kredensial Sesi & Cookie."
+    )
+
+
+def needs_login(lowered_message: str) -> bool:
+    return any(m in lowered_message for m in LOGIN_MARKERS)
 
 
 @contextlib.contextmanager

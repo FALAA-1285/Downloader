@@ -63,7 +63,7 @@ async def test_extract_social_media_success(dummy_ctx):
         assert outcome.title == "Sample Great Video"
         assert outcome.thumbnail == "https://example.com/thumb.jpg"
         assert len(outcome.media) >= 3  # Best video, 720p/480p, audio, thumbnail
-        
+
         types = [m.type for m in outcome.media]
         assert "video" in types
         assert "audio" in types
@@ -115,3 +115,24 @@ async def test_platform_adapters_instantiation():
         assert a.id is not None
         assert a.name is not None
         assert a.status == "active"
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        (
+            "ERROR: [Instagram] x: Instagram sent an empty media response. Check ... without being logged-in.",
+            "login_required",
+        ),
+        ("ERROR: [vimeo] 1: The web client only works when logged-in. Use --cookies", "login_required"),
+        ("ERROR: [twitter] 1: No video could be found in this tweet", "no_video"),
+        ("ERROR: [youtube] x: Private video. Sign in if you've been granted access", "private_video"),
+    ],
+)
+def test_extract_errors_are_actionable(message, code):
+    from app.adapters.platforms.social import _map_extract_error
+
+    err = _map_extract_error(Exception(message), "https://www.instagram.com/reel/x/")
+    assert err.code == code
+    if code == "login_required":
+        assert "instagram.com" in err.message and "cookies.txt" in err.message
