@@ -25,7 +25,16 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 JSONType = JSON().with_variant(JSONB(), "postgresql")
 
-JOB_STATUSES = ("pending", "processing", "downloading", "paused", "completed", "failed", "cancelled")
+JOB_STATUSES = (
+    "scheduled",
+    "pending",
+    "processing",
+    "downloading",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+)
 # Status akhir: job tidak lagi dikerjakan worker.
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 MEDIA_TYPES = ("image", "video", "audio", "subtitle", "text")
@@ -86,6 +95,8 @@ class DownloadJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Job berstatus `scheduled` dimasukkan ke antrean saat waktu ini tiba.
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

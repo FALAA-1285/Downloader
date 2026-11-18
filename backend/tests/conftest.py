@@ -32,6 +32,8 @@ def settings(tmp_path: Path) -> Settings:
         probe_budget_seconds=5,
         rate_limit_analyze_per_minute=100,
         ffprobe_path="__no_ffprobe__",
+        # Test tidak pernah meluncurkan Chromium sungguhan; test render memakai renderer tiruan.
+        enable_dynamic_rendering=False,
     )
 
 

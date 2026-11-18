@@ -7,6 +7,7 @@ import type { MediaType } from "@/types";
 import { checkUrl } from "@/lib/url";
 import { cn } from "@/lib/utils";
 import { cookiesForUrl, normalizeDomain, saveCookieEntry, useCookieEntries } from "@/lib/cookie-store";
+import { cleanReferer } from "@/services/api";
 import { Button } from "@/components/ui/button";
 import { TypeIcon } from "@/components/ui/primitives";
 
@@ -35,6 +36,7 @@ export function UrlForm({
   const [submitting, setSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [customCookies, setCustomCookies] = useState("");
+  const [referer, setReferer] = useState("");
   // Berlangganan perubahan cookie agar label "Aktif" ikut diperbarui.
   useCookieEntries();
   const targetDomain = normalizeDomain(checkUrl(url).ok ? url : null);
@@ -61,6 +63,12 @@ export function UrlForm({
     setError(null);
     setSubmitting(true);
     const qs = new URLSearchParams({ url: res.url });
+    const cleanRef = cleanReferer(referer.trim());
+    if (referer.trim() && !cleanRef) {
+      setError("Halaman asal (Referer) harus berupa URL http:// atau https://.");
+      return;
+    }
+    if (cleanRef) qs.set("referer", cleanRef);
     if (types.length && types.length < TYPES.length) qs.set("types", types.join(","));
     router.push(`/analyze?${qs.toString()}`);
     // Reset setelah navigasi agar tombol tidak terkunci jika URL sama.
@@ -198,6 +206,20 @@ export function UrlForm({
               placeholder="sessionid=xyz123; csrftoken=abc; atau tempel cookies.txt"
               rows={2}
               className="mt-2 w-full rounded-lg border border-line bg-bg p-2 font-mono text-[11px] text-ink outline-none placeholder:text-muted-foreground/60 focus:border-brand"
+            />
+            <label htmlFor="referer-input" className="mt-3 block text-[12px] font-medium text-ink">
+              Halaman asal / Referer (opsional)
+            </label>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              Isi dengan URL halaman tempat tautan stream (.m3u8/.mp4) ditemukan bila tautan itu ditolak (HTTP 403).
+            </p>
+            <input
+              id="referer-input"
+              type="url"
+              value={referer}
+              onChange={(e) => setReferer(e.target.value)}
+              placeholder="https://situs.example/halaman-video"
+              className="mt-2 h-8 w-full rounded-lg border border-line bg-bg px-2 font-mono text-[11px] text-ink outline-none placeholder:text-muted-foreground/60 focus:border-brand"
             />
           </div>
         )}

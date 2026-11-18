@@ -6,6 +6,7 @@ import {
   type AdapterInfo,
   type AnalyzeResult,
   type DownloadJob,
+  type DownloadOptions,
   type MediaType,
   type RequestAuthOptions,
   type ServerConfig,
@@ -62,6 +63,23 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 15_0
   }
 }
 
+/**
+ * Header permintaan (mis. Referer halaman asal dari ekstensi) per ID analisis, agar unduhan
+ * memakai header yang sama dengan analisisnya. Hanya di memori tab ini.
+ */
+const analysisHeaders = new Map<string, Record<string, string>>();
+
+/** Referer http(s) yang valid, atau null. */
+export function cleanReferer(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function analyzeUrl(
@@ -80,7 +98,7 @@ export async function analyzeUrl(
   // Hanya cookie milik domain URL ini yang dikirim (C-03).
   const cookies = authOptions?.cookies ?? cookiesForUrl(url);
   const headers = authOptions?.headers;
-  return request<AnalyzeResult>(
+  const result = await request<AnalyzeResult>(
     "/analyze",
     {
       method: "POST",
@@ -93,6 +111,8 @@ export async function analyzeUrl(
     },
     ANALYZE_TIMEOUT_MS,
   );
+  if (headers && result?.id) analysisHeaders.set(result.id, headers);
+  return result;
 }
 
 export async function createDownloads(
@@ -101,12 +121,15 @@ export async function createDownloads(
   subtitleFormat: SubtitleFormat = "original",
   authOptions?: RequestAuthOptions,
   sourceUrl?: string,
+  options?: DownloadOptions,
 ): Promise<DownloadJob[]> {
   const cookies = authOptions?.cookies ?? (sourceUrl ? cookiesForUrl(sourceUrl) : null);
-  const headers = authOptions?.headers;
+  const headers = authOptions?.headers ?? analysisHeaders.get(analysisId);
   const extraPayload = {
     ...(cookies ? { cookies } : {}),
     ...(headers ? { headers } : {}),
+    ...(options?.scheduledAt ? { scheduled_at: options.scheduledAt } : {}),
+    ...(options?.maxSpeedKbps ? { max_speed_kbps: options.maxSpeedKbps } : {}),
   };
   if (mediaIds.length <= 250) {
     return request<DownloadJob[]>("/downloads", {

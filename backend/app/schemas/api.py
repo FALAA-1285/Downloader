@@ -6,12 +6,12 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, StringConstraints
+from pydantic import AfterValidator, AwareDatetime, BaseModel, Field, StringConstraints
 
 from app.core.cookies import validate_custom_headers
 
 MediaType = Literal["image", "video", "audio", "subtitle", "text"]
-JobStatus = Literal["pending", "processing", "downloading", "paused", "completed", "failed", "cancelled"]
+JobStatus = Literal["scheduled", "pending", "processing", "downloading", "paused", "completed", "failed", "cancelled"]
 # Header kustom: allowlist nama, tanpa CR/LF, maksimal 20 (M-06).
 CustomHeaders = Annotated[dict[str, str] | None, AfterValidator(validate_custom_headers)]
 SourceType = Literal["generic", "youtube", "instagram", "facebook", "tiktok", "x", "social_other"] | str
@@ -96,6 +96,10 @@ class CreateDownloadsRequest(BaseModel):
     subtitle_format: Literal["original", "srt"] = "original"
     cookies: str | None = Field(default=None, max_length=65536)
     headers: CustomHeaders = None
+    # Antrean terjadwal: mulai pada waktu ini (zona waktu wajib). Kosong/lewat = langsung.
+    scheduled_at: AwareDatetime | None = None
+    # Batas kecepatan per unduhan dalam KB/s. Kosong = bawaan server.
+    max_speed_kbps: int | None = Field(default=None, ge=16, le=10_000_000)
 
 
 class BatchZipRequest(BaseModel):
@@ -131,6 +135,8 @@ class DownloadJobOut(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     expires_at: datetime | None
+    scheduled_at: datetime | None = None
+    max_speed_kbps: int | None = None
 
 
 class AdapterOut(BaseModel):

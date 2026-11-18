@@ -184,3 +184,18 @@ describe("kontrol unduhan & polling", () => {
     expect(clicks[0]).toBe(`http://api.test/api/v1/downloads/zip/${"f".repeat(32)}?name=koleksi.zip`);
   });
 });
+
+describe("Referer halaman asal", () => {
+  it("dipakai saat analisis dan otomatis ikut saat membuat unduhan", async () => {
+    const { api, fetchMock } = await loadWithBackend(async (input) =>
+      String(input).endsWith("/analyze") ? json({ id: "an-9", media: [] }) : json([]),
+    );
+    const headers = { Referer: "https://tv.example/watch/1" };
+    await api.analyzeUrl("https://cdn.tv.example/master.m3u8", [], { headers });
+    await api.createDownloads("an-9", ["m-1"]);
+    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    expect(bodies[0].headers).toEqual(headers);
+    expect(bodies[1].headers).toEqual(headers);
+    expect(api.cleanReferer("javascript:alert(1)")).toBeNull();
+  });
+});

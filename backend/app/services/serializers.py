@@ -10,7 +10,7 @@ def job_out(job: DownloadJob) -> DownloadJobOut:
         progress: int | None = 100
     elif job.size_total:
         progress = min(100, int(job.size_downloaded * 100 / job.size_total))
-    elif job.status in ("pending", "processing"):
+    elif job.status in ("scheduled", "pending", "processing"):
         progress = 0 if job.size_total else None
     else:
         progress = None
@@ -30,4 +30,6 @@ def job_out(job: DownloadJob) -> DownloadJobOut:
         created_at=aware(job.created_at),
         completed_at=aware(job.completed_at),
         expires_at=aware(file.expires_at) if file else None,
+        scheduled_at=aware(job.scheduled_at),
+        max_speed_kbps=(job.options or {}).get("max_speed_kbps"),
     )

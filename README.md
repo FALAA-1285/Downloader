@@ -81,11 +81,11 @@ Test `ffprobe` dilewati otomatis jika FFmpeg tidak terpasang.
 | POST | `/analyze` | Menganalisis URL. Body: `{"url", "media_types": [], "cookies"?, "headers"?}` |
 | GET | `/jobs/{id}` | Ringkasan hasil analisis |
 | GET | `/jobs/{id}/media` | Hasil analisis lengkap yang tersimpan |
-| POST | `/downloads` | Membuat pekerjaan unduhan. Body: `{"analysis_id", "media_ids": [], "subtitle_format": "original"\|"srt"}` |
+| POST | `/downloads` | Membuat pekerjaan unduhan. Body: `{"analysis_id", "media_ids": [], "subtitle_format": "original"\|"srt", "scheduled_at"?, "max_speed_kbps"?}` |
 | GET | `/downloads/{id}` | Status dan progres |
 | POST | `/downloads/status` | Status banyak job sekaligus. Body: `{"ids": []}` |
 | POST | `/downloads/{id}/pause` | Menjeda job antre/berjalan (file parsial disimpan) |
-| POST | `/downloads/{id}/resume` | Melanjutkan job yang dijeda (HTTP Range / `.part` yt-dlp) |
+| POST | `/downloads/{id}/resume` | Melanjutkan job yang dijeda, atau memulai job terjadwal sekarang |
 | POST | `/downloads/{id}/cancel` | Membatalkan job dan menghapus file parsialnya |
 | POST | `/downloads/{id}/retry` | Mengulang pekerjaan yang gagal atau dibatalkan |
 | GET | `/downloads/{id}/file` | Mengunduh file hasil |
@@ -105,6 +105,18 @@ Tiga endpoint tidak ada di tabel PRD §12 dan ditambahkan untuk kebutuhan fronte
 `/downloads/{id}/retry`, `/adapters`, dan `/config`. Tabel `analyses` juga ditambahkan (di luar
 PRD §11) supaya pekerjaan unduhan hanya bisa dibuat dari media yang benar-benar ditemukan server,
 bukan dari URL sembarang yang dikirim klien.
+
+## Fitur unduhan ala IDM/1DM
+
+- **Multi-koneksi:** file ≥ `MULTI_CONNECTION_MIN_MB` dari server yang mendukung `Range` dipecah ke
+  `DOWNLOAD_CONNECTIONS` koneksi paralel. Status segmen disimpan sehingga jeda/retry melanjutkan setiap
+  segmen dari posisi terakhirnya; server tanpa `Range` otomatis memakai satu koneksi.
+- **Batas kecepatan & jadwal:** per unduhan dari panel ⚙ di bilah pilihan (atau `max_speed_kbps` /
+  `scheduled_at` di API). Job terjadwal berstatus `scheduled` dan diantrekan oleh penjadwal di proses API.
+- **Kecepatan & sisa waktu** ditampilkan di halaman Downloads.
+- **Pantau clipboard** (opt-in di Settings): tautan yang disalin ditawarkan untuk dianalisis.
+- **Ekstensi:** tombol "Unduh video ini" di pemutar video, menu klik kanan, dan pengalihan unduhan browser
+  (opt-in). Lihat `extension/README.md`.
 
 ## Keamanan (NFR-01)
 

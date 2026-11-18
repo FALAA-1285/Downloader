@@ -3,6 +3,7 @@ import { Inter, Inter_Tight, Geist_Mono } from "next/font/google";
 import { SiteHeader } from "@/components/layout/site-header";
 import { SiteFooter } from "@/components/layout/site-footer";
 import { DemoBanner } from "@/components/layout/demo-banner";
+import { ClipboardWatcher } from "@/components/layout/clipboard-watcher";
 import "./globals.css";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
@@ -33,6 +34,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <SiteHeader />
         <main className="flex flex-1 flex-col">{children}</main>
         <SiteFooter />
+        <ClipboardWatcher />
       </body>
     </html>
   );

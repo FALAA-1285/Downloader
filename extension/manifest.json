@@ -1,11 +1,21 @@
 {
   "manifest_version": 3,
   "name": "Universal Media Downloader Helper",
-  "version": "1.1.0",
-  "description": "Tangkap tautan stream HLS/DASH, video, dan subtitle dari tab yang Anda izinkan, lalu kirim ke Universal Media Downloader.",
-  "permissions": ["activeTab", "webRequest", "cookies", "storage", "scripting"],
+  "version": "1.2.0",
+  "description": "Tombol unduh di pemutar video, menu klik kanan, penangkap stream & unduhan browser untuk Universal Media Downloader.",
+  "permissions": [
+    "activeTab",
+    "webRequest",
+    "cookies",
+    "storage",
+    "scripting",
+    "contextMenus",
+    "downloads"
+  ],
   "host_permissions": [],
-  "optional_host_permissions": ["<all_urls>"],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "background.js"
   },

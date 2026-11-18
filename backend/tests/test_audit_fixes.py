@@ -380,3 +380,100 @@ def test_doh_cache_is_bounded(monkeypatch):
         url_guard._cache_put(f"h{i}.example", ["93.184.216.34"])
     assert len(url_guard._DOH_CACHE) == 3
     url_guard._DOH_CACHE.clear()
+
+
+# --- Fallback browser saat server menolak klien biasa (HTTP 403) ------------------------------
+
+
+def _fake_render(result):
+    async def render_page(url, settings, **kwargs):
+        return result
+
+    return render_page
+
+
+async def _analyze_with_renderer(settings, monkeypatch, web, result, url="https://guarded.example/watch"):
+    from app.extractors import dynamic
+
+    web.get(url).mock(return_value=httpx.Response(403, content=b"Forbidden"))
+    monkeypatch.setattr(dynamic, "render_page", _fake_render(result))
+    async with running_app(settings.model_copy(update={"enable_dynamic_rendering": True})) as application:
+        transport = httpx.ASGITransport(app=application, client=("127.0.0.1", 1))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver", headers={"X-UMD-Client": "t"}
+        ) as c:
+            return await c.post("/api/v1/analyze", json={"url": url, "media_types": ["video", "text"]})
+
+
+async def test_403_falls_back_to_browser(settings, monkeypatch, web):
+    from app.extractors.common import Candidate
+    from app.extractors.dynamic import RenderResult
+
+    html = "<html><head><title>Video Uji</title></head><body><p>" + "kata " * 120 + "</p></body></html>"
+    stream = Candidate(
+        type="video", url="https://cdn.guarded.example/master.m3u8", probe=False, options={"downloader": "yt-dlp"}
+    )
+    res = await _analyze_with_renderer(
+        settings, monkeypatch, web, RenderResult(html=html, candidates=[stream], status=200)
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["page"]["title"] == "Video Uji"
+    assert [m["url"] for m in data["media"]] == ["https://cdn.guarded.example/master.m3u8"]
+    assert any("lewat browser" in w for w in data["warnings"])
+
+
+async def test_403_with_bot_challenge_gives_clear_error(settings, monkeypatch, web):
+    from app.extractors.dynamic import RenderResult
+
+    res = await _analyze_with_renderer(
+        settings, monkeypatch, web, RenderResult(html="<title>Just a moment...</title>", status=403, challenge=True)
+    )
+    assert res.status_code == 422 and res.json()["detail"]["code"] == "bot_protection"
+
+
+async def test_403_in_browser_too_keeps_forbidden(settings, monkeypatch, web):
+    from app.extractors.dynamic import RenderResult
+
+    res = await _analyze_with_renderer(settings, monkeypatch, web, RenderResult(html="<html>denied</html>", status=403))
+    assert res.status_code == 422 and res.json()["detail"]["code"] == "forbidden"
+
+
+def test_challenge_detection():
+    from app.extractors.dynamic import looks_like_challenge
+
+    assert looks_like_challenge("<title>Just a moment...</title><div id=cf-browser-verification>", 403)
+    assert not looks_like_challenge("<html><body>Halaman biasa</body></html>", 403)
+    # Halaman besar yang kebetulan memuat skrip Cloudflare bukan tantangan bila dokumennya 200.
+    assert not looks_like_challenge("<script src=/cdn-cgi/challenge-platform/x.js></script>" + "x" * 40_000, 200)
+
+
+async def test_stream_link_403_hint_and_referer_forwarded(app, client, web, monkeypatch):
+    """Tautan stream bertoken: tanpa Referer → pesan yang menjelaskan; dengan Referer → diteruskan."""
+    url = "https://cdn.tv.example/hls/master.m3u8?token=abc"
+    page = "https://tv.example/watch/1"
+
+    def serve(request):
+        if request.headers.get("referer") == page:
+            return httpx.Response(200, headers={"Content-Type": "application/vnd.apple.mpegurl"}, content=b"#EXTM3U\n")
+        return httpx.Response(403)
+
+    route = web.get(url).mock(side_effect=serve)
+    denied = await client.post("/api/v1/analyze", json={"url": url})
+    assert denied.status_code == 422 and "halaman asal" in denied.json()["detail"]["message"]
+
+    ok = await client.post("/api/v1/analyze", json={"url": url, "headers": {"Referer": page}})
+    assert ok.status_code == 200, ok.text
+    item = ok.json()["media"][0]
+    assert route.calls.last.request.headers["referer"] == page
+
+    await _suppress_enqueue(app, monkeypatch)
+    jobs = (
+        await client.post(
+            "/api/v1/downloads",
+            json={"analysis_id": ok.json()["id"], "media_ids": [item["id"]], "headers": {"Referer": page}},
+        )
+    ).json()
+    async with app.state.sessions() as s:
+        row = await s.get(DownloadJob, uuid.UUID(jobs[0]["id"]))
+    assert row.options["headers"] == {"Referer": page}

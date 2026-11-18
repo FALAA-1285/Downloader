@@ -49,6 +49,7 @@ export function TypeTag({ type, className }: { type: MediaType; className?: stri
 }
 
 const STATUS_STYLE: Record<JobStatus, string> = {
+  scheduled: "bg-brand-soft text-brand",
   pending: "bg-idle-bg text-idle",
   processing: "bg-run-bg text-run",
   downloading: "bg-run-bg text-run",

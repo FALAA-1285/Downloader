@@ -11,6 +11,8 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/primitives";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Switch } from "@/components/ui/switch";
+import { setClipboardWatch, useClipboardWatchPref } from "./clipboard-watcher";
 import { CookieManager } from "./cookie-manager";
 import { setTheme, useThemePref, type ThemePref } from "./theme";
 
@@ -57,6 +59,7 @@ export function SettingsView() {
   const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null);
   const [health, setHealth] = useState<"checking" | "up" | "down">("checking");
   const [loadError, setLoadError] = useState(false);
+  const clipboardWatch = useClipboardWatchPref();
 
   useEffect(() => {
     getConfig().then(setConfig).catch(() => setLoadError(true));
@@ -103,6 +106,32 @@ export function SettingsView() {
         description="Cookie login per domain, tersimpan di browser ini. Dipakai untuk konten di akun Anda sendiri yang membutuhkan login atau dibatasi usia. Cookie hanya dikirim ke domain pemiliknya."
       >
         <CookieManager />
+      </Section>
+
+      <Section
+        title="Pantau clipboard"
+        description="Saat Anda menyalin tautan lalu kembali ke jendela ini, UMD menawarkan untuk menganalisisnya — seperti 1DM/IDM. Browser akan meminta izin membaca clipboard."
+      >
+        <div className="flex items-center gap-3">
+          <Switch
+            id="clipboard-watch"
+            checked={clipboardWatch}
+            onCheckedChange={async (on) => {
+              if (on) {
+                // Minta izin sekarang (dalam klik pengguna) agar tawaran berikutnya tidak tertahan.
+                try {
+                  await navigator.clipboard.readText();
+                } catch {
+                  // Izin ditolak: fitur tetap aktif, tetapi tidak akan menemukan apa pun.
+                }
+              }
+              setClipboardWatch(on);
+            }}
+          />
+          <Label htmlFor="clipboard-watch" className="text-[13px] font-normal text-ink-2">
+            {clipboardWatch ? "Aktif" : "Nonaktif"}
+          </Label>
+        </div>
       </Section>
 
       <Section

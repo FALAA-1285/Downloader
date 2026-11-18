@@ -64,9 +64,12 @@ async def create_downloads(
         body.subtitle_format,
         cookies=body.cookies,
         headers=body.headers,
+        scheduled_at=body.scheduled_at,
+        max_speed_kbps=body.max_speed_kbps,
     )
     for job in jobs:
-        if not await _enqueue_or_fail(session, queue, job.id):
+        # Job terjadwal diantrekan oleh penjadwal saat waktunya tiba.
+        if job.status == "pending" and not await _enqueue_or_fail(session, queue, job.id):
             await session.refresh(job)
     return [job_out(j) for j in jobs]
 

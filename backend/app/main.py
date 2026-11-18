@@ -69,14 +69,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         await queue.startup()
         cleanup_task = asyncio.create_task(_cleanup_loop(app)) if settings.cleanup_interval_seconds > 0 else None
+        scheduler_task = asyncio.create_task(_scheduler_loop(app)) if settings.scheduler_interval_seconds > 0 else None
         log.info("Universal Media Downloader API %s siap (queue=%s)", APP_VERSION, queue.name)
         try:
             yield
         finally:
-            if cleanup_task:
-                cleanup_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await cleanup_task
+            for task in (cleanup_task, scheduler_task):
+                if task:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
             await queue.shutdown()
             from app.extractors.dynamic import shutdown_browser_pool
 
@@ -199,6 +201,31 @@ class BodyLimitMiddleware:
 
 def _error(status: int, code: str, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
     return JSONResponse({"detail": {"code": code, "message": message}}, status_code=status, headers=headers)
+
+
+async def run_scheduler_once(app: FastAPI) -> int:
+    """Memasukkan job terjadwal yang jatuh tempo ke antrean. Mengembalikan jumlahnya."""
+    from app.services.download_service import mark_failed, promote_due_jobs
+
+    async with app.state.sessions() as session:
+        due = await promote_due_jobs(session)
+        for job_id in due:
+            try:
+                await app.state.queue.enqueue(job_id)
+            except Exception:
+                log.exception("gagal mengantrekan job terjadwal %s", job_id)
+                await mark_failed(session, job_id, "Antrean unduhan tidak tersedia saat jadwal tiba.")
+    return len(due)
+
+
+async def _scheduler_loop(app: FastAPI) -> None:
+    settings: Settings = app.state.settings
+    while True:
+        try:
+            await run_scheduler_once(app)
+        except Exception:
+            log.exception("penjadwal unduhan gagal")
+        await asyncio.sleep(settings.scheduler_interval_seconds)
 
 
 async def _cleanup_loop(app: FastAPI) -> None:

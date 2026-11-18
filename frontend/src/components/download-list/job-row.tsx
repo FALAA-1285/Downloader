@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { CircleStop, Download, Loader2, Pause, Play, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
-import { formatBytes, formatRelative } from "@/lib/utils";
+import { CalendarClock, CircleStop, Download, Loader2, Pause, Play, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
+import { formatBytes, formatDate, formatEta, formatRelative, formatSpeed } from "@/lib/utils";
 import {
   canFetchFile,
   cancelJob,
@@ -31,7 +31,11 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
   const running = job.status === "processing" || job.status === "downloading";
   const active = running || job.status === "pending";
   const paused = job.status === "paused";
-  const controllable = active || paused;
+  const scheduled = job.status === "scheduled";
+  const controllable = active || paused || scheduled;
+  const speed = job.status === "downloading" ? formatSpeed(job.speed_bps) : null;
+  const eta =
+    job.status === "downloading" && job.size_total ? formatEta(job.size_total - job.size_downloaded, job.speed_bps) : null;
 
   const sizeLabel =
     job.status === "downloading"
@@ -70,7 +74,7 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
         </div>
 
         <div className="col-span-2 col-start-2 row-start-2 sm:col-span-1 sm:col-start-auto sm:row-start-auto">
-          {!active && !paused && (
+          {!active && !paused && !scheduled && (
             <div className="mb-1 sm:hidden">
               {expired ? <StatusPill status="pending" label="Kedaluwarsa" /> : <StatusPill status={job.status} />}
             </div>
@@ -90,7 +94,21 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
                 </span>
                 {job.status === "downloading" && job.progress != null && <span>{job.progress}%</span>}
               </p>
+              {(speed || eta || job.max_speed_kbps) && (
+                <p className="mt-0.5 flex justify-between text-[11px] tabular-nums text-muted-foreground">
+                  <span>
+                    {speed ?? ""}
+                    {job.max_speed_kbps ? ` (maks ${formatBytes(job.max_speed_kbps * 1024)}/s)` : ""}
+                  </span>
+                  {eta && <span>{eta}</span>}
+                </p>
+              )}
             </div>
+          ) : scheduled ? (
+            <p className="flex items-center gap-1.5 text-[12px] text-ink-2">
+              <CalendarClock className="size-3.5 shrink-0 text-brand" aria-hidden />
+              Mulai {job.scheduled_at ? formatDate(job.scheduled_at) : "sesuai jadwal"}
+            </p>
           ) : paused ? (
             <div>
               <Progress value={job.progress} />
@@ -155,14 +173,14 @@ export function JobRow({ job, now }: { job: StoredJob; now: number }) {
               <Pause className="size-3.5" />
             </Button>
           )}
-          {paused && (
+          {(paused || scheduled) && (
             <Button
               variant="ghost"
               size="icon-sm"
               disabled={busy}
               onClick={() => run(() => resumeJob(job.id))}
-              aria-label={`Lanjutkan ${job.filename}`}
-              title="Lanjutkan"
+              aria-label={`${scheduled ? "Mulai sekarang" : "Lanjutkan"} ${job.filename}`}
+              title={scheduled ? "Mulai sekarang" : "Lanjutkan"}
             >
               <Play className="size-3.5" />
             </Button>

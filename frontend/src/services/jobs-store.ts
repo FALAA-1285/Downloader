@@ -7,7 +7,14 @@
 // - Kegagalan sinkronisasi dengan backend disimpan sebagai `syncError` agar UI bisa menampilkannya.
 
 import { useSyncExternalStore } from "react";
-import { ApiError, type AnalyzeResult, type DownloadJob, type MediaItem, type SubtitleFormat } from "@/types";
+import {
+  ApiError,
+  type AnalyzeResult,
+  type DownloadJob,
+  type DownloadOptions,
+  type MediaItem,
+  type SubtitleFormat,
+} from "@/types";
 import {
   FILE_LINKS_NEED_FETCH,
   IS_DEMO,
@@ -32,6 +39,9 @@ export type StoredJob = DownloadJob & {
   _speed?: number;
   _fail?: boolean;
   _t?: number;
+  /** Kecepatan unduhan terkini (byte/detik), dihitung dari selisih progres antar-polling. */
+  speed_bps?: number | null;
+  _polled_at?: number;
 };
 
 const KEY = "umd.jobs.v1";
@@ -47,9 +57,9 @@ let isDrainingQueue = false;
 
 /** Pekerjaan yang hanya ada di browser (mis. ekspor TXT), bukan di server. */
 const isLocal = (j: { id: string }) => j.id.startsWith("job-");
-/** Job yang masih dikerjakan server (dipantau lewat polling). Job `paused` tidak dipolling. */
+/** Job yang dipantau lewat polling. Job `paused` tidak; job `scheduled` ya, agar terlihat saat mulai. */
 export const isActive = (j: Pick<DownloadJob, "status">) =>
-  j.status === "pending" || j.status === "processing" || j.status === "downloading";
+  j.status === "scheduled" || j.status === "pending" || j.status === "processing" || j.status === "downloading";
 /** Job yang bisa dijeda/dibatalkan. */
 export const isRunning = (j: Pick<DownloadJob, "status">) => j.status === "processing" || j.status === "downloading";
 
@@ -230,7 +240,21 @@ async function tickRemote() {
     if (byId.size > 0) {
       consecutiveFailures = 0;
       setSyncError(null);
-      const nextJobs = jobs.map((j) => (byId.has(j.id) ? { ...j, ...byId.get(j.id)! } : j));
+      const now = Date.now();
+      const nextJobs = jobs.map((j) => {
+        const update = byId.get(j.id);
+        if (!update) return j;
+        const merged: StoredJob = { ...j, ...update, _polled_at: now };
+        // Kecepatan ala IDM: selisih byte antar-polling, dihaluskan agar tidak melompat-lompat.
+        if (merged.status === "downloading" && j._polled_at && now > j._polled_at) {
+          const delta = Math.max(0, merged.size_downloaded - j.size_downloaded);
+          const instant = (delta * 1000) / (now - j._polled_at);
+          merged.speed_bps = j.speed_bps ? j.speed_bps * 0.6 + instant * 0.4 : instant;
+        } else if (merged.status !== "downloading") {
+          merged.speed_bps = null;
+        }
+        return merged;
+      });
       nextJobs.forEach((j) => {
         if (autoSaveIds.has(j.id) && j.status === "completed") {
           autoSaveIds.delete(j.id);
@@ -284,6 +308,7 @@ export async function startDownloads(
   result: AnalyzeResult,
   items: MediaItem[],
   subtitleFormat: SubtitleFormat = "original",
+  options?: DownloadOptions,
 ): Promise<number> {
   load();
   const now = new Date().toISOString();
@@ -294,6 +319,7 @@ export async function startDownloads(
       subtitleFormat,
       undefined,
       result.page.url,
+      options,
     );
     // Jika <= 3 item, otomatis unduh ke browser saat selesai.
     // Jika lebih banyak (batch), biarkan tersimpan di server tanpa spamming puluhan dialog Save browser.

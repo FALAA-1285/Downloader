@@ -7,7 +7,7 @@ import logging
 import re
 from urllib.parse import urlsplit
 
-from app.core.cookies import parse_cookies
+from app.core.cookies import Cookie, parse_cookies
 from app.core.errors import AppError
 from app.core.http_client import open_stream, read_limited, status_error
 from app.extractors.common import (
@@ -22,13 +22,15 @@ from app.extractors.common import (
 )
 from app.extractors.images import extract_images
 from app.extractors.media import extract_av, extract_subtitles
-from app.extractors.page import has_login_form, is_login_url, needs_javascript, parse_html
+from app.extractors.page import ParsedPage, has_login_form, is_login_url, needs_javascript, parse_html
 from app.extractors.probe import probe_candidates
 from app.extractors.text import extract_text, word_count
 
 from .base import Adapter, AnalysisContext, AnalysisOutcome
 
 HTML_TYPES = ("text/html", "application/xhtml+xml")
+# Status yang sering berarti "klien non-browser ditolak"; dicoba ulang lewat Chromium.
+BROWSER_RETRY_STATUSES = {401, 403, 429, 503}
 log = logging.getLogger(__name__)
 
 
@@ -44,6 +46,23 @@ def _direct_type(mime: str, ext: str | None) -> str | None:
     if mime in ("text/vtt", "application/x-subrip") or ext in SUBTITLE_EXT:
         return "subtitle"
     return None
+
+
+def _has_referer(headers: dict[str, str] | None) -> bool:
+    return any(k.lower() == "referer" for k in (headers or {}))
+
+
+def _media_link_error(status: int, *, has_referer: bool) -> AppError:
+    if status not in (401, 403):
+        return status_error(status, subject="Tautan media")
+    hint = (
+        "Tautan ini kemungkinan bertoken dan sudah kedaluwarsa, atau terikat ke sesi/IP browser Anda. "
+        "Putar ulang videonya lalu tangkap tautan yang baru dengan ekstensi UMD."
+        if has_referer
+        else "Tautan stream seperti ini biasanya hanya dilayani bila disertai halaman asalnya. "
+        "Kirim lewat tombol “Unduh via UMD” di ekstensi, atau isi “Halaman asal / Referer” di opsi lanjutan."
+    )
+    return AppError("forbidden", f"Tautan media ditolak server (HTTP {status}). {hint}", 422)
 
 
 class GenericAdapter(Adapter):
@@ -64,23 +83,91 @@ class GenericAdapter(Adapter):
             headers.update(ctx.headers)
         # Cookie diubah ke daftar terikat domain; open_stream hanya mengirim yang cocok per hop.
         jar = parse_cookies(ctx.cookies, ctx.url)
+        blocked_status: int | None = None
         async with open_stream(ctx.client, ctx.url, settings, headers=headers, cookies=jar) as (resp, final_url):
             if resp.status_code >= 400:
-                raise status_error(resp.status_code)
-            mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if _direct_type("", url_ext(final_url)) is not None:
+                    # Tautan file media/stream langsung: browser tidak akan menampilkan halaman.
+                    raise _media_link_error(resp.status_code, has_referer=_has_referer(ctx.headers))
+                if resp.status_code in BROWSER_RETRY_STATUSES and settings.enable_dynamic_rendering:
+                    blocked_status = resp.status_code
+                else:
+                    raise status_error(resp.status_code)
+            else:
+                mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if not mime.startswith(HTML_TYPES):
+                    return self._direct_file(final_url, mime, resp.headers.get("content-length"), ctx)
+                data, truncated = await read_limited(resp, settings.max_page_bytes)
+                charset = resp.charset_encoding
 
-            if not mime.startswith(HTML_TYPES):
-                return self._direct_file(final_url, mime, resp.headers.get("content-length"), ctx)
-
-            data, truncated = await read_limited(resp, settings.max_page_bytes)
-            charset = resp.charset_encoding
+        if blocked_status is not None:
+            return await self._analyze_with_browser(ctx, final_url, blocked_status, jar)
 
         page, media, warnings, text_title, text = await asyncio.to_thread(self._extract, data, final_url, charset, ctx)
         if truncated:
             warnings.insert(
                 0, f"Halaman lebih besar dari {settings.max_page_size_mb:g} MB; hanya bagian awal yang dianalisis."
             )
+        return await self._finish(ctx, page, media, warnings, text_title, text, final_url, jar, rendered=False)
 
+    async def _analyze_with_browser(
+        self, ctx: AnalysisContext, url: str, blocked_status: int, jar: list[Cookie]
+    ) -> AnalysisOutcome:
+        """Server menolak klien HTTP biasa (401/403/429/503): coba lagi lewat Chromium.
+
+        Banyak situs hanya menolak klien non-browser. Halaman tetap dibuka lewat proxy penjaga
+        SSRF. Bila yang didapat adalah halaman tantangan anti-bot, analisis berhenti dengan pesan
+        yang jelas; tantangan seperti itu tidak diakali.
+        """
+        from app.extractors.dynamic import render_page
+
+        result = await render_page(
+            url,
+            ctx.settings,
+            wants_video=ctx.wants("video"),
+            wants_subtitles=ctx.wants("subtitle"),
+            cookies=ctx.cookies,
+            headers=ctx.headers,
+        )
+        if result.challenge:
+            raise AppError(
+                "bot_protection",
+                "Situs ini dilindungi pemeriksaan anti-bot (mis. Cloudflare) sehingga tidak dapat dianalisis "
+                "otomatis. Buka halamannya di browser Anda lalu gunakan ekstensi UMD untuk menangkap tautan "
+                "medianya, atau tambahkan cookie sesi untuk domain ini di Settings.",
+                422,
+            )
+        browser_ok = bool(result.html) and (result.status is None or result.status < 400)
+        if not browser_ok and not result.candidates:
+            raise status_error(result.status or blocked_status)
+
+        final_url = result.final_url or url
+        page, media, warnings, text_title, text = await asyncio.to_thread(
+            self._extract, result.html.encode("utf-8", "ignore"), final_url, "utf-8", ctx
+        )
+        existing = {m.url for m in media}
+        media += [c for c in result.candidates if c.url not in existing]
+        warnings = [
+            f"Server menolak klien biasa (HTTP {blocked_status}); halaman dianalisis lewat browser.",
+            *result.warnings,
+            *warnings,
+        ]
+        return await self._finish(ctx, page, media, warnings, text_title, text, final_url, jar, rendered=True)
+
+    async def _finish(
+        self,
+        ctx: AnalysisContext,
+        page: ParsedPage,
+        media: list[Candidate],
+        warnings: list[str],
+        text_title: str | None,
+        text: str | None,
+        final_url: str,
+        jar: list[Cookie],
+        *,
+        rendered: bool,
+    ) -> AnalysisOutcome:
+        settings = ctx.settings
         words = word_count(text)
         if is_login_url(final_url):
             raise AppError(
@@ -91,7 +178,7 @@ class GenericAdapter(Adapter):
         if has_login_form(page, words):
             # Bukan error: halaman bisa saja punya form login di header tetapi tetap berisi media publik.
             warnings.append("Halaman memuat form login; konten yang membutuhkan login tidak dianalisis.")
-        if needs_javascript(page, words):
+        if not rendered and needs_javascript(page, words):
             warnings.append("Halaman tampaknya dimuat dengan JavaScript; sebagian konten mungkin tidak terdeteksi.")
 
         has_video = any(m.type == "video" for m in media)
@@ -102,7 +189,8 @@ class GenericAdapter(Adapter):
             or needs_javascript(page, words)
         )
 
-        if settings.enable_dynamic_rendering and is_streaming_spa and (not has_video or not has_subtitle):
+        wants_render = settings.enable_dynamic_rendering and is_streaming_spa and (not has_video or not has_subtitle)
+        if not rendered and wants_render:
             try:
                 from app.extractors.dynamic import render_and_sniff
 
@@ -136,7 +224,6 @@ class GenericAdapter(Adapter):
                 warnings.append("Renderer dinamis tidak dapat dijalankan; hanya HTML statis yang dianalisis.")
 
             has_video = any(m.type == "video" for m in media)
-            has_subtitle = any(m.type == "subtitle" for m in media)
 
         if len(media) > settings.max_media_items:
             warnings.append(f"Ditemukan {len(media)} media; hanya {settings.max_media_items} pertama yang ditampilkan.")
@@ -150,8 +237,8 @@ class GenericAdapter(Adapter):
         url_path = (urlsplit(final_url).path or "").strip("/")
         if ctx.wants("video") and not has_video and (url_path in ("", "index", "home") or len(media) > 50):
             warnings.append(
-                "Halaman ini tampaknya merupakan beranda atau katalog daftar konten (bukan halaman pemutar film). "
-                "Untuk mengunduh video, buka judul film yang diinginkan lalu salin URL halaman film spesifik tersebut."
+                "Halaman ini tampaknya merupakan beranda atau katalog daftar konten (bukan halaman pemutar video). "
+                "Untuk mengunduh video, buka halaman video yang diinginkan lalu salin URL-nya."
             )
 
         if is_streaming_spa and ctx.wants("video") and not has_video:

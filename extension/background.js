@@ -5,8 +5,12 @@
 // - State disimpan di chrome.storage.session sehingga tetap ada saat service worker di-suspend.
 // - Penulisan per tab diserialkan agar request yang datang bersamaan tidak saling menimpa.
 
+importScripts("shared.js");
+
 const storageArea = chrome.storage.session || chrome.storage.local;
 const MAX_ITEMS_PER_TAB = 200;
+const ALL_URLS = { origins: ["<all_urls>"] };
+const OVERLAY_SCRIPT_ID = "umd-overlay";
 
 // Manifest/playlist & file media utuh. Segmen (.ts/.m4s) sengaja tidak ditangkap: tidak berguna
 // diunduh satu per satu, dan pola ".ts" juga cocok dengan file TypeScript di situs pengembang.
@@ -131,9 +135,150 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// Kirim ke UMD: memilih sumber terbaik untuk sebuah video
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Sumber terbaik untuk dikirim ke UMD:
+ * 1. Platform yang didukung yt-dlp (YouTube, dll.) → URL halaman.
+ * 2. `src` video berupa file http(s) biasa → URL itu.
+ * 3. Video MediaSource (`blob:`) → manifest HLS/DASH terakhir yang tertangkap di tab ini.
+ * 4. Selain itu → URL halaman (backend merender & menyadap halamannya).
+ */
+async function pickSource(tabId, tabUrl, src) {
+  if (tabUrl && umdPlatformOf(tabUrl)) return tabUrl;
+  if (src && /^https?:/i.test(src) && !PLATFORM_SEGMENT_REGEX.test(src)) return src;
+  if (tabId >= 0) {
+    const { items } = await readTab(tabId);
+    const manifests = items.filter((i) => /HLS|DASH/.test(i.type));
+    const videos = items.filter((i) => /Video/.test(i.type));
+    const best = manifests.at(-1) || videos.at(-1);
+    if (best) return best.url;
+  }
+  return tabUrl;
+}
+
+async function sendToUmd(url, referer) {
+  if (!url || !/^https?:/i.test(url)) return;
+  chrome.tabs.create({ url: await umdAnalyzeUrl(url, referer) });
+}
+
+// ---------------------------------------------------------------------------------------------
+// #2 Tombol "Unduh video ini" (content script, hanya setelah izin situs diberikan)
+// ---------------------------------------------------------------------------------------------
+
+async function syncOverlayRegistration() {
+  const [{ overlayEnabled }, granted, registered] = await Promise.all([
+    umdGetSettings(),
+    chrome.permissions.contains(ALL_URLS),
+    chrome.scripting.getRegisteredContentScripts({ ids: [OVERLAY_SCRIPT_ID] }),
+  ]);
+  const want = overlayEnabled && granted;
+  if (want && registered.length === 0) {
+    await chrome.scripting.registerContentScripts([
+      {
+        id: OVERLAY_SCRIPT_ID,
+        js: ["overlay.js"],
+        matches: ["http://*/*", "https://*/*"],
+        excludeMatches: ["http://localhost/*", "http://127.0.0.1/*"],
+        allFrames: true,
+        runAt: "document_idle",
+      },
+    ]);
+  } else if (!want && registered.length > 0) {
+    await chrome.scripting.unregisterContentScripts({ ids: [OVERLAY_SCRIPT_ID] });
+  }
+}
+
+chrome.permissions.onAdded.addListener(() => syncOverlayRegistration().catch(console.debug));
+chrome.permissions.onRemoved.addListener(() => syncOverlayRegistration().catch(console.debug));
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && "overlayEnabled" in changes) syncOverlayRegistration().catch(console.debug);
+});
+
+// ---------------------------------------------------------------------------------------------
+// #3 Menu klik kanan "Unduh dengan UMD"
+// ---------------------------------------------------------------------------------------------
+
+function createMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: "umd-media", title: "Unduh media ini dengan UMD", contexts: ["video", "audio", "image"] });
+    chrome.contextMenus.create({ id: "umd-link", title: "Unduh tautan ini dengan UMD", contexts: ["link"] });
+    chrome.contextMenus.create({ id: "umd-page", title: "Analisis halaman ini dengan UMD", contexts: ["page", "frame"] });
+  });
+}
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  const pageUrl = info.pageUrl || tab?.url;
+  let target;
+  if (info.menuItemId === "umd-media") target = await pickSource(tab?.id ?? -1, pageUrl, info.srcUrl);
+  else if (info.menuItemId === "umd-link") target = info.linkUrl;
+  else target = info.frameUrl || pageUrl;
+  await sendToUmd(target, pageUrl);
+});
+
+// ---------------------------------------------------------------------------------------------
+// #4 Tangkap unduhan browser dan alihkan ke UMD (opt-in)
+// ---------------------------------------------------------------------------------------------
+
+function extOf(name) {
+  const m = /\.([a-z0-9]{1,5})$/i.exec((name || "").split(/[?#]/)[0]);
+  return m ? m[1].toLowerCase() : "";
+}
+
+async function isOwnUmdUrl(url) {
+  try {
+    const u = new URL(url);
+    const { uiBase } = await umdGetSettings();
+    // File hasil unduhan UMD sendiri (Web UI/API lokal) jangan ditangkap ulang.
+    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname) || u.origin === new URL(uiBase).origin;
+  } catch {
+    return true;
+  }
+}
+
+chrome.downloads.onCreated.addListener(async (item) => {
+  const settings = await umdGetSettings();
+  if (!settings.captureDownloads || item.byExtensionId === chrome.runtime.id) return;
+  const url = item.finalUrl || item.url;
+  if (!/^https?:/i.test(url) || (await isOwnUmdUrl(url))) return;
+  const allowed = String(settings.captureExtensions)
+    .split(",")
+    .map((x) => x.trim().toLowerCase().replace(/^\./, ""))
+    .filter(Boolean);
+  const ext = extOf(item.filename) || extOf(url);
+  if (!ext || !allowed.includes(ext)) return;
+  const size = item.totalBytes > 0 ? item.totalBytes : item.fileSize;
+  if (size > 0 && size < Number(settings.captureMinMB) * 1024 * 1024) return;
+
+  try {
+    await chrome.downloads.cancel(item.id);
+    await chrome.downloads.erase({ id: item.id });
+  } catch (e) {
+    console.debug("gagal membatalkan unduhan browser:", e);
+    return;
+  }
+  await sendToUmd(url, item.referrer || undefined);
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  createMenus();
+  syncOverlayRegistration().catch(console.debug);
+});
+chrome.runtime.onStartup.addListener(() => syncOverlayRegistration().catch(console.debug));
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // Hanya popup ekstensi ini yang boleh mengirim perintah.
-  if (sender.id !== chrome.runtime.id || sender.tab) return false;
+  if (sender.id !== chrome.runtime.id) return false;
+
+  // Dari content script overlay (tombol di atas video).
+  if (request.action === "overlayDownload" && sender.tab) {
+    pickSource(sender.tab.id, sender.tab.url, request.src).then((url) => sendToUmd(url, sender.tab.url));
+    return false;
+  }
+
+  // Perintah lain hanya dari popup ekstensi ini.
+  if (sender.tab) return false;
 
   if (request.action === "getCapturedMedia") {
     readTab(request.tabId).then((state) => sendResponse({ media: state.items }));

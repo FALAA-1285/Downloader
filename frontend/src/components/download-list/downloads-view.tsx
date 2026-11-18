@@ -14,7 +14,7 @@ import { SyncErrorAlert } from "./sync-error";
 
 type Filter = "all" | "active" | "completed" | "failed";
 // Tab "Berjalan" juga menampilkan unduhan yang dijeda agar mudah dilanjutkan.
-const ACTIVE: JobStatus[] = ["pending", "processing", "downloading", "paused"];
+const ACTIVE: JobStatus[] = ["scheduled", "pending", "processing", "downloading", "paused"];
 
 const FILTERS: Array<{ id: Filter; label: string }> = [
   { id: "all", label: "Semua" },

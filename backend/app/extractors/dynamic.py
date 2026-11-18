@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.config import Settings
@@ -54,6 +56,33 @@ PLAY_SELECTORS = (
     "video",
 )
 SETTLE_SECONDS = 2.5
+
+# Penanda halaman tantangan anti-bot (Cloudflare, DDoS-Guard, dll.). Halaman seperti ini tidak
+# berisi konten; aplikasi tidak mencoba mengakalinya, hanya memberi pesan yang jelas.
+CHALLENGE_MARKERS = re.compile(
+    r"just a moment\.\.\.|attention required! \| cloudflare|cf-browser-verification|challenges\.cloudflare\.com"
+    r"|/cdn-cgi/challenge-platform|ddos-guard|checking your browser|captcha-delivery",
+    re.I,
+)
+
+
+@dataclass
+class RenderResult:
+    html: str = ""
+    candidates: list[Candidate] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    status: int | None = None  # status HTTP dokumen utama
+    final_url: str | None = None
+    challenge: bool = False
+
+
+def looks_like_challenge(html: str, status: int | None) -> bool:
+    if not html or not CHALLENGE_MARKERS.search(html[:200_000]):
+        return False
+    # Banyak halaman normal memuat reCAPTCHA di form; anggap tantangan hanya bila dokumen utama
+    # ditolak atau halamannya nyaris kosong.
+    return status in (403, 429, 503) or len(html) < 30_000
+
 
 CHROMIUM_ARGS = [
     "--disable-dev-shm-usage",
@@ -161,15 +190,34 @@ async def render_and_sniff(
 
     Mengembalikan (rendered_html, intercepted_candidates, warnings).
     """
+    result = await render_page(
+        url, settings, wants_video=wants_video, wants_subtitles=wants_subtitles, cookies=cookies, headers=headers
+    )
+    return result.html, result.candidates, result.warnings
+
+
+async def render_page(
+    url: str,
+    settings: Settings,
+    *,
+    wants_video: bool = True,
+    wants_subtitles: bool = True,
+    cookies: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> RenderResult:
+    """Seperti `render_and_sniff`, ditambah status HTTP dokumen utama, URL akhir, dan
+    apakah halaman yang didapat adalah tantangan anti-bot."""
     try:
         import playwright.async_api  # noqa: F401
     except ImportError:
         logger.warning("Playwright tidak terpasang. Dynamic rendering dilewati.")
-        return "", [], ["Engine rendering dinamis (Playwright) belum terpasang."]
+        return RenderResult(warnings=["Engine rendering dinamis (Playwright) belum terpasang."])
 
     intercepted: dict[str, Candidate] = {}
     warnings: list[str] = []
     rendered_html = ""
+    main_status: int | None = None
+    final_url: str | None = None
     timeout_ms = int(settings.dynamic_render_timeout_seconds * 1000)
 
     def _handle_intercept(target_url: str, content_type: str | None = None) -> None:
@@ -251,7 +299,8 @@ async def render_and_sniff(
         page.on("response", on_response)
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            main_status = response.status if response is not None else None
         except Exception as exc:  # noqa: BLE001 - halaman lambat tetap disadap
             logger.debug("Page goto timeout/error (dilanjutkan untuk sniffing): %s", exc)
 
@@ -271,6 +320,7 @@ async def render_and_sniff(
         # TIDAK ditelan agar `wait_for` di lapisan atas benar-benar berhenti.
         await asyncio.sleep(SETTLE_SECONDS)
         rendered_html = await page.content()
+        final_url = page.url if isinstance(page.url, str) else None
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -281,4 +331,11 @@ async def render_and_sniff(
             with contextlib.suppress(Exception):
                 await asyncio.shield(context.close())
 
-    return rendered_html, list(intercepted.values()), warnings
+    return RenderResult(
+        html=rendered_html,
+        candidates=list(intercepted.values()),
+        warnings=warnings,
+        status=main_status if isinstance(main_status, int) else None,
+        final_url=final_url,
+        challenge=looks_like_challenge(rendered_html, main_status if isinstance(main_status, int) else None),
+    )

@@ -1,41 +1,9 @@
 // Popup — Universal Media Downloader Helper.
 // Semua teks dari halaman (URL, judul) dirender dengan textContent, bukan innerHTML (M-08).
 
-const DEFAULT_BASE = "http://localhost:3000";
+const DEFAULT_BASE = UMD_DEFAULTS.uiBase;
 const ALL_URLS = { origins: ["<all_urls>"] };
-
-// Platform yang diunduh langsung oleh backend lewat yt-dlp (sama dengan adapter di backend).
-// Situs ini memutar video lewat MediaSource dalam potongan-potongan, jadi tidak ada satu tautan
-// stream yang bisa ditangkap — dan memang tidak perlu: cukup kirim URL halamannya.
-const PLATFORMS = {
-  "youtube.com": "YouTube",
-  "youtu.be": "YouTube",
-  "youtube-nocookie.com": "YouTube",
-  "instagram.com": "Instagram",
-  "facebook.com": "Facebook",
-  "fb.watch": "Facebook",
-  "tiktok.com": "TikTok",
-  "x.com": "X",
-  "twitter.com": "X",
-  "threads.net": "Threads",
-  "reddit.com": "Reddit",
-  "pinterest.com": "Pinterest",
-  "vimeo.com": "Vimeo",
-  "twitch.tv": "Twitch",
-  "dailymotion.com": "Dailymotion",
-  "soundcloud.com": "SoundCloud",
-};
-
-function platformOf(url) {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    const match = Object.keys(PLATFORMS).find((d) => host === d || host.endsWith(`.${d}`));
-    return match ? PLATFORMS[match] : null;
-  } catch {
-    return null;
-  }
-}
-
+const platformOf = umdPlatformOf;
 let currentPlatform = null;
 
 const $ = (id) => document.getElementById(id);
@@ -58,8 +26,7 @@ function el(tag, className, text) {
 }
 
 async function getUiBase() {
-  const { uiBase } = await chrome.storage.local.get("uiBase");
-  return uiBase || DEFAULT_BASE;
+  return (await umdGetSettings()).uiBase || DEFAULT_BASE;
 }
 
 function normalizeBase(value) {
@@ -72,10 +39,46 @@ function normalizeBase(value) {
   }
 }
 
-async function openAnalyze(url) {
-  const base = await getUiBase();
-  chrome.tabs.create({ url: `${base}/analyze?url=${encodeURIComponent(url)}` });
+async function openAnalyze(url, referer) {
+  // Tautan stream bertoken sering hanya dilayani bila Referer-nya halaman asal.
+  chrome.tabs.create({ url: await umdAnalyzeUrl(url, referer) });
 }
+
+async function initOptions() {
+  const settings = await umdGetSettings();
+  $("optOverlay").checked = settings.overlayEnabled;
+  $("optCapture").checked = settings.captureDownloads;
+  $("optExts").value = settings.captureExtensions;
+  $("optMinMB").value = String(settings.captureMinMB);
+  $("captureOpts").hidden = !settings.captureDownloads;
+
+  $("optOverlay").addEventListener("change", async (e) => {
+    await chrome.storage.local.set({ overlayEnabled: e.target.checked });
+    setStatus(e.target.checked ? "✓ Tombol unduh aktif (muat ulang tab)" : "Tombol unduh dimatikan");
+  });
+  $("optCapture").addEventListener("change", async (e) => {
+    await chrome.storage.local.set({ captureDownloads: e.target.checked });
+    $("captureOpts").hidden = !e.target.checked;
+    setStatus(e.target.checked ? "✓ Unduhan browser dialihkan ke UMD" : "Unduhan browser tidak dialihkan");
+  });
+  $("optExts").addEventListener("change", async (e) => {
+    const exts = e.target.value
+      .split(",")
+      .map((x) => x.trim().toLowerCase().replace(/^\./, ""))
+      .filter((x) => /^[a-z0-9]{1,5}$/.test(x));
+    e.target.value = exts.join(",");
+    await chrome.storage.local.set({ captureExtensions: e.target.value });
+    setStatus("✓ Jenis file disimpan");
+  });
+  $("optMinMB").addEventListener("change", async (e) => {
+    const value = Math.max(0, Math.floor(Number(e.target.value) || 0));
+    e.target.value = String(value);
+    await chrome.storage.local.set({ captureMinMB: value });
+    setStatus("✓ Ukuran minimum disimpan");
+  });
+}
+
+let pageUrl = null;
 
 /** Cookie tab dalam format Netscape cookies.txt (domain, path, secure, HttpOnly, kedaluwarsa). */
 function toNetscape(cookies) {
@@ -137,7 +140,7 @@ function renderItems(items) {
       setStatus("✓ URL stream disalin");
     });
     const send = el("button", "btn-small btn-download", "Unduh via UMD");
-    send.addEventListener("click", () => openAnalyze(item.url));
+    send.addEventListener("click", () => openAnalyze(item.url, pageUrl));
     actions.append(copy, send);
     row.append(header, urlEl, actions);
     list.append(row);
@@ -194,11 +197,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("webLink").href = base;
   $("uiBase").value = base;
   await refreshPermissionUi();
+  await initOptions();
   if (!tab) return;
 
   $("tabTitle").textContent = tab.title || "Tab aktif";
   $("tabUrl").textContent = tab.url || "—";
   currentPlatform = tab.url ? platformOf(tab.url) : null;
+  pageUrl = tab.url || null;
   if (currentPlatform) $("btnAnalyzePage").textContent = `Unduh dari ${currentPlatform} via Web UI`;
 
   $("btnAnalyzePage").addEventListener("click", () => tab.url && openAnalyze(tab.url));

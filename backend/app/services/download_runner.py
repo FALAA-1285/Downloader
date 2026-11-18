@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import logging
 import os
 import re
@@ -31,11 +32,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yt_dlp
 from sqlalchemy import func, select, update
 
 from app.core.config import Settings
-from app.core.cookies import parse_cookies
+from app.core.cookies import Cookie, parse_cookies
 from app.core.errors import AppError, TransientError
 from app.core.guard_proxy import get_guard_proxy
 from app.core.http_client import build_client, is_encoded, iter_body, open_stream, status_error
@@ -137,6 +139,7 @@ async def run_download(job_id: uuid.UUID, sessions: SessionFactory, settings: Se
                 await _event(sessions, job_id, "retry_scheduled", {"attempt": attempt, "reason": exc.message})
                 await asyncio.sleep(delay)
                 continue
+            await asyncio.to_thread(remove_partials, settings.temp_dir, job_id)
             await _fail(sessions, job_id, f"{exc.message} Sudah dicoba {attempt} kali.")
             return
         except AppError as exc:
@@ -179,6 +182,7 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
         or ".m3u8" in lower_url
         or ".mpd" in lower_url
     )
+    speed_limit = speed_limit_bytes(options, settings)
     keep_partial = False
     try:
         if use_ytdlp:
@@ -187,7 +191,7 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
             )
         else:
             try:
-                async with asyncio.timeout(settings.download_timeout_seconds):
+                async with asyncio.timeout(_time_budget(media_type, settings, speed_limit)):
                     head, size = await _stream_to_file(
                         job_id,
                         media_url,
@@ -198,6 +202,7 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
                         referer=source_url,
                         cookies=options.get("cookies"),
                         custom_headers=options.get("headers"),
+                        speed_limit=speed_limit,
                     )
             except AppError as exc:
                 if (exc.status_code in (401, 403) or exc.code in ("forbidden", "auth_required")) and media_type in (
@@ -215,7 +220,12 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
     except JobInterrupted as exc:
         keep_partial = exc.status == "paused"
         raise
+    except TransientError:
+        # Retry berikutnya melanjutkan dari file parsial (Range / segmen / `.part` yt-dlp).
+        keep_partial = True
+        raise
     except TimeoutError as exc:
+        keep_partial = True
         raise TransientError(
             f"Unduhan melewati batas waktu {settings.download_timeout_seconds} detik.", code="download_timeout"
         ) from exc
@@ -224,6 +234,15 @@ async def _attempt(job_id: uuid.UUID, sessions: SessionFactory, settings: Settin
     finally:
         if not keep_partial:
             await asyncio.to_thread(remove_partials, settings.temp_dir, job_id)
+
+
+def _time_budget(media_type: str, settings: Settings, speed_limit: int) -> float:
+    """Batas waktu total. Dengan batas kecepatan, waktunya diperpanjang secukupnya agar file
+    sebesar batas maksimum tetap bisa selesai."""
+    if not speed_limit:
+        return float(settings.download_timeout_seconds)
+    max_bytes, _ = _size_limit(media_type, settings)
+    return max(float(settings.download_timeout_seconds), max_bytes / speed_limit * 1.2 + 60)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -266,11 +285,12 @@ async def _run_ytdlp(
     proxy = await get_guard_proxy(settings)
     loop = asyncio.get_running_loop()
     max_bytes, limit_label = _size_limit(media_type, settings)
-    control = _Control(deadline=time.monotonic() + settings.download_timeout_seconds, max_bytes=max_bytes, loop=loop)
+    budget = _time_budget(media_type, settings, speed_limit_bytes(options, settings))
+    control = _Control(deadline=time.monotonic() + budget, max_bytes=max_bytes, loop=loop)
     try:
         # Batas waktu juga diperiksa di dalam thread (progress hook); ini jaring pengaman bila
         # yt-dlp tertahan di fase tanpa progres (ekstraksi, koneksi).
-        async with asyncio.timeout(settings.download_timeout_seconds + 60):
+        async with asyncio.timeout(budget + 60):
             return await asyncio.to_thread(
                 _download_ytdlp_sync,
                 url,
@@ -392,6 +412,9 @@ def _download_ytdlp_sync(
             "updatetime": False,
             "progress_hooks": [progress_hook],
         }
+        rate = speed_limit_bytes(options, settings)
+        if rate:
+            ydl_opts["ratelimit"] = rate
         if ffmpeg_bin:
             ydl_opts["ffmpeg_location"] = str(Path(ffmpeg_bin).resolve().parent)
         if media_type == "audio":
@@ -487,14 +510,45 @@ async def _report_progress(
 
 
 # ---------------------------------------------------------------------------------------------
-# HTTP langsung
+# HTTP langsung (satu koneksi atau multi-koneksi)
 # ---------------------------------------------------------------------------------------------
+
+MIN_SEGMENT_BYTES = 2 * 1024 * 1024
+SEGMENT_RETRIES = 3
 
 
 def _size_limit(media_type: str, settings: Settings) -> tuple[int, str]:
     if media_type == "subtitle":
         return min(settings.max_subtitle_bytes, settings.max_download_bytes), f"{settings.max_subtitle_size_mb} MB"
     return settings.max_download_bytes, f"{settings.max_download_size_mb} MB"
+
+
+def speed_limit_bytes(options: dict, settings: Settings) -> int:
+    """Batas kecepatan job dalam byte/detik (0 = tanpa batas)."""
+    kbps = options.get("max_speed_kbps") or settings.download_speed_limit_kbps
+    return int(kbps) * 1024 if kbps else 0
+
+
+class RateLimiter:
+    """Token bucket async; dipakai bersama oleh semua koneksi satu unduhan."""
+
+    def __init__(self, bytes_per_second: int) -> None:
+        self.rate = float(bytes_per_second)
+        self.tokens = self.rate
+        self.last = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def consume(self, amount: int) -> None:
+        async with self._lock:
+            while True:
+                now = time.monotonic()
+                self.tokens = min(self.rate, self.tokens + (now - self.last) * self.rate)
+                self.last = now
+                # Potongan lebih besar dari kapasitas bucket diizinkan dengan "utang" token.
+                if self.tokens >= amount or self.tokens >= self.rate:
+                    self.tokens -= amount
+                    return
+                await asyncio.sleep((min(amount, self.rate) - self.tokens) / self.rate)
 
 
 def _content_range(value: str | None) -> tuple[int, int | None] | None:
@@ -509,6 +563,15 @@ def _content_range(value: str | None) -> tuple[int, int | None] | None:
         return None
 
 
+def _sidecar(tmp_path: Path) -> Path:
+    """Status segmen unduhan multi-koneksi (untuk jeda/lanjut)."""
+    return tmp_path.with_name(tmp_path.name.removesuffix(".part") + ".segments.json")
+
+
+class _RangeUnsupported(Exception):  # noqa: N818
+    """Server tidak menghormati Range saat unduhan multi-koneksi; ulang dengan satu koneksi."""
+
+
 async def _stream_to_file(
     job_id: uuid.UUID,
     url: str,
@@ -519,6 +582,8 @@ async def _stream_to_file(
     referer: str | None = None,
     cookies: str | None = None,
     custom_headers: dict[str, str] | None = None,
+    speed_limit: int = 0,
+    allow_segments: bool = True,
 ) -> tuple[bytes, int]:
     max_bytes, limit_label = _size_limit(media_type, settings)
     headers = {
@@ -532,15 +597,28 @@ async def _stream_to_file(
         headers["Referer"] = referer
     if custom_headers:
         headers.update(custom_headers)
-    # Lanjutkan unduhan yang dijeda: minta sisa file dengan Range.
+    jar = parse_cookies(cookies, referer or url)
+    limiter = RateLimiter(speed_limit) if speed_limit else None
+    sidecar = _sidecar(tmp_path)
+
+    if allow_segments and await asyncio.to_thread(sidecar.is_file):
+        try:
+            return await _segmented_download(
+                job_id, url, None, tmp_path, headers, jar, sessions, settings, max_bytes, limit_label, limiter
+            )
+        except _RangeUnsupported:
+            await asyncio.to_thread(remove_partials, settings.temp_dir, job_id)
+
+    # Lanjutkan unduhan satu-koneksi yang dijeda: minta sisa file dengan Range.
     offset = await asyncio.to_thread(lambda: tmp_path.stat().st_size if tmp_path.exists() else 0)
     if offset:
         headers["Range"] = f"bytes={offset}-"
-    jar = parse_cookies(cookies, referer or url)
 
+    segmented_total: int | None = None
+    segmented_url = url
     async with (
         build_client(settings) as client,
-        open_stream(client, url, settings, headers=headers, cookies=jar) as (resp, _final),
+        open_stream(client, url, settings, headers=headers, cookies=jar) as (resp, final_url),
     ):
         if resp.status_code == 416 and offset:
             # Server menolak Range: file parsial dianggap tidak valid, ulang dari awal.
@@ -566,50 +644,239 @@ async def _stream_to_file(
                 f"Ukuran file ({total / 1_048_576:.1f} MB) melebihi batas {limit_label}.",
                 413,
             )
-        await check_storage_capacity(
-            sessions, settings, incoming=(total - offset) if total is not None else None, exclude=tmp_path
-        )
-        await _update(sessions, job_id, status="downloading", size_total=total, size_downloaded=offset)
 
-        written = offset
-        head = b""
-        if resumed:
-            head = await asyncio.to_thread(_read_head, tmp_path)
-        buffer = bytearray()
-        last_report = time.monotonic()
-        fh = await asyncio.to_thread(tmp_path.open, "ab" if resumed else "wb")
-        try:
-            async for chunk in iter_body(resp, CHUNK):
-                written += len(chunk)
-                if written > max_bytes:
-                    raise AppError("file_too_large", f"Unduhan dihentikan: file melebihi batas {limit_label}.", 413)
-                if len(head) < SNIFF_BYTES:
-                    head += chunk[: SNIFF_BYTES - len(head)]
-                buffer += chunk
-                if len(buffer) >= WRITE_BUFFER:
+        # Multi-koneksi (seperti IDM/1DM): file besar dengan dukungan Range dipecah ke beberapa
+        # koneksi paralel. Respons pertama ditutup tanpa membaca body-nya.
+        if (
+            allow_segments
+            and not resumed
+            and resp.status_code == 200
+            and total is not None
+            and total >= settings.multi_connection_min_mb * 1024 * 1024
+            and settings.download_connections > 1
+            and resp.headers.get("accept-ranges", "").lower() == "bytes"
+            and not is_encoded(resp)
+        ):
+            segmented_total, segmented_url = total, final_url
+        else:
+            await check_storage_capacity(
+                sessions, settings, incoming=(total - offset) if total is not None else None, exclude=tmp_path
+            )
+            await _update(sessions, job_id, status="downloading", size_total=total, size_downloaded=offset)
+
+            written = offset
+            head = b""
+            if resumed:
+                head = await asyncio.to_thread(_read_head, tmp_path)
+            buffer = bytearray()
+            last_report = time.monotonic()
+            fh = await asyncio.to_thread(tmp_path.open, "ab" if resumed else "wb")
+            try:
+                async for chunk in iter_body(resp, CHUNK):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise AppError("file_too_large", f"Unduhan dihentikan: file melebihi batas {limit_label}.", 413)
+                    if limiter:
+                        await limiter.consume(len(chunk))
+                    if len(head) < SNIFF_BYTES:
+                        head += chunk[: SNIFF_BYTES - len(head)]
+                    buffer += chunk
+                    if len(buffer) >= WRITE_BUFFER:
+                        await asyncio.to_thread(fh.write, bytes(buffer))
+                        buffer.clear()
+                    if time.monotonic() - last_report >= PROGRESS_INTERVAL:
+                        last_report = time.monotonic()
+                        try:
+                            await _update(sessions, job_id, size_downloaded=written)
+                        except JobInterrupted:
+                            # Simpan yang sudah diterima agar bisa dilanjutkan.
+                            if buffer:
+                                await asyncio.to_thread(fh.write, bytes(buffer))
+                                buffer.clear()
+                            raise
+                if buffer:
                     await asyncio.to_thread(fh.write, bytes(buffer))
-                    buffer.clear()
-                if time.monotonic() - last_report >= PROGRESS_INTERVAL:
-                    last_report = time.monotonic()
-                    try:
-                        await _update(sessions, job_id, size_downloaded=written)
-                    except JobInterrupted:
-                        # Simpan yang sudah diterima agar bisa dilanjutkan.
-                        if buffer:
-                            await asyncio.to_thread(fh.write, bytes(buffer))
-                            buffer.clear()
-                        raise
-            if buffer:
-                await asyncio.to_thread(fh.write, bytes(buffer))
-        finally:
-            await asyncio.to_thread(fh.close)
+            finally:
+                await asyncio.to_thread(fh.close)
 
-        if written == 0:
-            raise AppError("empty_file", "Sumber mengirim file kosong.", 422)
-        if total is not None and written < total:
-            raise TransientError("Unduhan terputus sebelum file lengkap.", code="incomplete")
-        await _update(sessions, job_id, size_downloaded=written, size_total=written)
-        return head, written
+            if written == 0:
+                raise AppError("empty_file", "Sumber mengirim file kosong.", 422)
+            if total is not None and written < total:
+                raise TransientError("Unduhan terputus sebelum file lengkap.", code="incomplete")
+            await _update(sessions, job_id, size_downloaded=written, size_total=written)
+            return head, written
+
+    try:
+        return await _segmented_download(
+            job_id,
+            segmented_url,
+            segmented_total,
+            tmp_path,
+            headers,
+            jar,
+            sessions,
+            settings,
+            max_bytes,
+            limit_label,
+            limiter,
+        )
+    except _RangeUnsupported:
+        log.info("server %s tidak menghormati Range; beralih ke satu koneksi", redact_url(url))
+        await asyncio.to_thread(remove_partials, settings.temp_dir, job_id)
+        return await _stream_to_file(
+            job_id,
+            url,
+            media_type,
+            tmp_path,
+            sessions,
+            settings,
+            referer=referer,
+            cookies=cookies,
+            custom_headers=custom_headers,
+            speed_limit=speed_limit,
+            allow_segments=False,
+        )
+
+
+def _write_at(path: Path, position: int, data: bytes) -> None:
+    with path.open("r+b") as fh:
+        fh.seek(position)
+        fh.write(data)
+
+
+def _prepare_segments(tmp_path: Path, sidecar: Path, url: str, total: int, connections: int) -> list[list[int]]:
+    count = max(1, min(connections, total // MIN_SEGMENT_BYTES))
+    size = -(-total // count)  # pembulatan ke atas
+    segments = [[start, min(start + size, total) - 1, 0] for start in range(0, total, size)]
+    with tmp_path.open("wb") as fh:
+        fh.truncate(total)
+    sidecar.write_text(json.dumps({"url": url, "total": total, "segments": segments}), encoding="utf-8")
+    return segments
+
+
+def _save_sidecar(sidecar: Path, url: str, total: int, segments: list[list[int]]) -> None:
+    tmp = sidecar.with_name(sidecar.name + ".tmp")
+    tmp.write_text(json.dumps({"url": url, "total": total, "segments": segments}), encoding="utf-8")
+    os.replace(tmp, sidecar)
+
+
+async def _segmented_download(
+    job_id: uuid.UUID,
+    url: str,
+    total: int | None,
+    tmp_path: Path,
+    headers: dict[str, str],
+    jar: list[Cookie],
+    sessions: SessionFactory,
+    settings: Settings,
+    max_bytes: int,
+    limit_label: str,
+    limiter: RateLimiter | None,
+) -> tuple[bytes, int]:
+    """Unduhan multi-koneksi: setiap segmen diminta dengan Range dan ditulis ke posisinya sendiri.
+
+    Status segmen disimpan di file sidecar sehingga jeda/retry melanjutkan setiap segmen dari
+    posisi terakhirnya. Setiap koneksi tetap lewat `open_stream` (validasi SSRF per hop).
+    """
+    sidecar = _sidecar(tmp_path)
+    if total is None:
+        try:
+            state = json.loads(await asyncio.to_thread(sidecar.read_text, encoding="utf-8"))
+            total, segments, url = int(state["total"]), [list(map(int, s)) for s in state["segments"]], state["url"]
+            if not await asyncio.to_thread(lambda: tmp_path.is_file() and tmp_path.stat().st_size == total):
+                raise ValueError("ukuran file parsial tidak cocok")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise _RangeUnsupported from exc
+        validate_url(url, settings.port_allowlist)
+    else:
+        if total > max_bytes:
+            raise AppError("file_too_large", f"Ukuran file melebihi batas {limit_label}.", 413)
+        segments = await asyncio.to_thread(
+            _prepare_segments, tmp_path, sidecar, url, total, settings.download_connections
+        )
+
+    done_bytes = sum(s[2] for s in segments)
+    await check_storage_capacity(sessions, settings, incoming=total - done_bytes, exclude=tmp_path)
+    await _update(sessions, job_id, status="downloading", size_total=total, size_downloaded=done_bytes)
+
+    async def fetch(client: httpx.AsyncClient, seg: list[int]) -> None:
+        start, end = seg[0], seg[1]
+        failures = 0
+        while start + seg[2] <= end:
+            before = seg[2]
+            pos = start + seg[2]
+            seg_headers = {**headers, "Range": f"bytes={pos}-{end}"}
+            buffer = bytearray()
+            buffer_pos = pos
+            error: Exception | None = None
+            try:
+                async with open_stream(client, url, settings, headers=seg_headers, cookies=jar) as (resp, _final):
+                    if resp.status_code in (200, 416):
+                        raise _RangeUnsupported
+                    if resp.status_code != 206:
+                        raise status_error(resp.status_code, subject="File")
+                    cr = _content_range(resp.headers.get("content-range"))
+                    if not cr or cr[0] != pos:
+                        raise _RangeUnsupported
+                    async for chunk in iter_body(resp, CHUNK):
+                        chunk = chunk[: end - (start + seg[2]) + 1]
+                        if not chunk:
+                            break
+                        if limiter:
+                            await limiter.consume(len(chunk))
+                        buffer += chunk
+                        seg[2] += len(chunk)
+                        if len(buffer) >= WRITE_BUFFER:
+                            await asyncio.to_thread(_write_at, tmp_path, buffer_pos, bytes(buffer))
+                            buffer_pos += len(buffer)
+                            buffer.clear()
+                        if start + seg[2] > end:
+                            break
+            except (TransientError, httpx.HTTPError) as exc:
+                error = exc
+            finally:
+                if buffer:
+                    await asyncio.to_thread(_write_at, tmp_path, buffer_pos, bytes(buffer))
+            if start + seg[2] > end:
+                return
+            # Koneksi putus/ditutup lebih awal: lanjutkan dari posisi terakhir. Hanya percobaan
+            # tanpa kemajuan sama sekali yang dihitung gagal.
+            failures = failures + 1 if seg[2] == before else 0
+            if failures > SEGMENT_RETRIES:
+                raise TransientError("Salah satu koneksi unduhan terus terputus.", code="segment_failed") from error
+            await asyncio.sleep(min(2**failures, 8) if failures else 0)
+
+    async def reporter() -> None:
+        while True:
+            await asyncio.sleep(PROGRESS_INTERVAL)
+            await asyncio.to_thread(_save_sidecar, sidecar, url, total, segments)
+            await _update(sessions, job_id, size_downloaded=sum(s[2] for s in segments))
+
+    pending = [s for s in segments if s[0] + s[2] <= s[1]]
+    async with build_client(settings) as client:
+        report_task = asyncio.create_task(reporter())
+        workers = [asyncio.create_task(fetch(client, seg)) for seg in pending]
+        all_workers = asyncio.gather(*workers)
+        try:
+            # Selesai bila semua segmen selesai, atau berhenti begitu satu segmen gagal atau
+            # reporter mendeteksi jeda/batal (JobInterrupted).
+            done, _ = await asyncio.wait([all_workers, report_task], return_when=asyncio.FIRST_COMPLETED)
+            if report_task in done:
+                report_task.result()
+            all_workers.result()
+        finally:
+            for task in (*workers, report_task):
+                task.cancel()
+            await asyncio.gather(*workers, report_task, return_exceptions=True)
+            all_workers.cancel()
+            await asyncio.to_thread(_save_sidecar, sidecar, url, total, segments)
+
+    written = sum(s[2] for s in segments)
+    if written < total:
+        raise TransientError("Unduhan terputus sebelum file lengkap.", code="incomplete")
+    await asyncio.to_thread(sidecar.unlink, missing_ok=True)
+    await _update(sessions, job_id, size_downloaded=total, size_total=total)
+    return await asyncio.to_thread(_read_head, tmp_path), total
 
 
 def _read_head(path: Path) -> bytes:

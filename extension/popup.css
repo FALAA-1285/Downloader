@@ -290,3 +290,25 @@ body {
 [hidden] {
   display: none !important;
 }
+
+.check {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  cursor: pointer;
+}
+
+.capture-opts {
+  margin: 6px 0 0 20px;
+}
+
+.capture-opts input {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}

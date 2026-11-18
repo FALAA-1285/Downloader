@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     download_timeout_seconds: int = 600
     download_max_retries: int = 2
     download_concurrency: int = 3
+    # Unduhan multi-koneksi: file besar dipecah ke beberapa koneksi Range paralel.
+    download_connections: int = 4
+    multi_connection_min_mb: int = 8
+    # Batas kecepatan bawaan per unduhan dalam KB/s (0 = tanpa batas); bisa diatur per unduhan.
+    download_speed_limit_kbps: int = 0
+    # Seberapa sering antrean terjadwal diperiksa.
+    scheduler_interval_seconds: float = 15.0
     file_retention_hours: int = 24
     # Riwayat job selesai/gagal/dibatalkan yang lebih tua dari ini dihapus otomatis (0 = simpan selamanya).
     history_retention_days: int = 30

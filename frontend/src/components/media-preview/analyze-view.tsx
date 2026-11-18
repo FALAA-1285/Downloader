@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, CircleAlert, Globe, Info, RotateCcw, SearchX } from "lucide-react";
 import type { AnalyzeResult, MediaItem, MediaType } from "@/types";
-import { analyzeUrl } from "@/services/api";
+import { analyzeUrl, cleanReferer } from "@/services/api";
 import { checkUrl } from "@/lib/url";
 import { MEDIA_LABEL, cn, formatRelative } from "@/lib/utils";
 import { UrlForm } from "@/components/downloader/url-form";
@@ -29,6 +29,9 @@ export function AnalyzeView() {
   const params = useSearchParams();
   const rawUrl = params.get("url") ?? "";
   const typesParam = params.get("types") ?? "";
+  // Halaman asal tautan (dikirim ekstensi atau diisi di opsi lanjutan). Banyak tautan stream
+  // bertoken hanya mau dilayani bila Referer-nya halaman asal.
+  const referer = cleanReferer(params.get("referer"));
   const types = useMemo(
     () => typesParam.split(",").filter((t): t is MediaType => VALID_TYPES.has(t as MediaType)),
     [typesParam],
@@ -58,28 +61,39 @@ export function AnalyzeView() {
   // `key` mereset seluruh state (hasil, tab, pilihan) saat URL, filter, atau percobaan berubah.
   return (
     <AnalyzeRun
-      key={`${check.url}|${types.join()}|${attempt}`}
+      key={`${check.url}|${types.join()}|${referer ?? ""}|${attempt}`}
       url={check.url}
       types={types}
+      referer={referer}
       onRetry={() => setAttempt((a) => a + 1)}
     />
   );
 }
 
-function AnalyzeRun({ url, types, onRetry }: { url: string; types: MediaType[]; onRetry: () => void }) {
+function AnalyzeRun({
+  url,
+  types,
+  referer,
+  onRetry,
+}: {
+  url: string;
+  types: MediaType[];
+  referer: string | null;
+  onRetry: () => void;
+}) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [tab, setTab] = useState<MediaType | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
-    analyzeUrl(url, types)
+    analyzeUrl(url, types, referer ? { headers: { Referer: referer } } : undefined)
       .then((result) => !cancelled && setState({ kind: "done", result }))
       .catch((e: Error) => !cancelled && setState({ kind: "error", message: e.message }));
     return () => {
       cancelled = true;
     };
-  }, [url, types]);
+  }, [url, types, referer]);
 
   if (state.kind === "loading") return <AnalyzeSkeleton url={url} types={types} />;
 

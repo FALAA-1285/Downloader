@@ -74,6 +74,7 @@ export const MEDIA_LABEL: Record<MediaType, string> = {
 };
 
 export const STATUS_LABEL: Record<JobStatus, string> = {
+  scheduled: "Terjadwal",
   pending: "Menunggu",
   processing: "Diproses",
   downloading: "Mengunduh",
@@ -112,4 +113,19 @@ export function extFromName(
   if (type === "image") return "JPG";
   if (type === "subtitle") return "VTT";
   return "—";
+}
+
+/** "1,4 MB/s" — kecepatan unduhan. */
+export function formatSpeed(bytesPerSecond: number | null | undefined): string | null {
+  if (!bytesPerSecond || bytesPerSecond < 1) return null;
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+/** Perkiraan sisa waktu, mis. "sisa 2 mnt" / "sisa 45 dtk". */
+export function formatEta(remainingBytes: number, bytesPerSecond: number | null | undefined): string | null {
+  if (!bytesPerSecond || bytesPerSecond < 1 || remainingBytes <= 0) return null;
+  const seconds = Math.ceil(remainingBytes / bytesPerSecond);
+  if (seconds < 60) return `sisa ${seconds} dtk`;
+  if (seconds < 3600) return `sisa ${Math.ceil(seconds / 60)} mnt`;
+  return `sisa ${Math.floor(seconds / 3600)} j ${Math.ceil((seconds % 3600) / 60)} mnt`;
 }

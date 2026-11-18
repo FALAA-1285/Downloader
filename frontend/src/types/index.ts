@@ -3,6 +3,7 @@
 export type MediaType = "image" | "video" | "subtitle" | "text" | "audio";
 
 export type JobStatus =
+  | "scheduled"
   | "pending"
   | "processing"
   | "downloading"
@@ -76,6 +77,17 @@ export interface DownloadJob {
   created_at: string;
   completed_at: string | null;
   expires_at: string | null;
+  /** Waktu mulai antrean terjadwal (status `scheduled`). */
+  scheduled_at?: string | null;
+  /** Batas kecepatan unduhan ini dalam KB/s, bila diatur. */
+  max_speed_kbps?: number | null;
+}
+
+export interface DownloadOptions {
+  /** ISO 8601 dengan zona waktu; kosong = mulai sekarang. */
+  scheduledAt?: string | null;
+  /** Batas kecepatan dalam KB/s; kosong = bawaan server. */
+  maxSpeedKbps?: number | null;
 }
 
 export interface AdapterInfo {

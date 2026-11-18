@@ -22,8 +22,8 @@
     </div>
 
     <div class="permission-box" id="permissionBox" hidden>
-      <p>Penangkapan stream dari lalu lintas jaringan belum diizinkan. Izin bisa dicabut kapan saja.</p>
-      <button id="btnGrant" class="btn btn-primary">Izinkan penangkapan jaringan</button>
+      <p>Izinkan akses situs agar UMD bisa menangkap stream dan menampilkan tombol unduh di pemutar video. Izin bisa dicabut kapan saja.</p>
+      <button id="btnGrant" class="btn btn-primary">Izinkan akses situs</button>
     </div>
 
     <div class="actions-row">
@@ -47,6 +47,14 @@
         <input id="uiBase" type="url" spellcheck="false" placeholder="http://localhost:3000">
         <button id="btnSaveBase" class="btn-small">Simpan</button>
       </div>
+      <label class="check"><input type="checkbox" id="optOverlay"> Tombol “Unduh video ini” di pemutar video</label>
+      <label class="check"><input type="checkbox" id="optCapture"> Alihkan unduhan browser ke UMD</label>
+      <div class="capture-opts" id="captureOpts">
+        <label for="optExts">Jenis file</label>
+        <input id="optExts" type="text" spellcheck="false">
+        <label for="optMinMB">Ukuran minimum (MB)</label>
+        <input id="optMinMB" type="number" min="0" step="1">
+      </div>
       <button id="btnRevoke" class="btn-link" hidden>Cabut izin penangkapan jaringan</button>
     </details>
   </main>
@@ -55,6 +63,7 @@
     <span id="statusText">Siap</span>
   </footer>
 
+  <script src="shared.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

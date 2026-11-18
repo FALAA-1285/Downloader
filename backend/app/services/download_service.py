@@ -6,6 +6,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import Select, or_, select
@@ -33,8 +34,13 @@ async def create_jobs(
     subtitle_format: str,
     cookies: str | None = None,
     headers: dict[str, str] | None = None,
+    scheduled_at: datetime | None = None,
+    max_speed_kbps: int | None = None,
 ) -> list[DownloadJob]:
     analysis = await session.get(Analysis, analysis_id)
+    now = utcnow()
+    # Jadwal yang sudah lewat (atau beberapa detik lagi) dianggap "mulai sekarang".
+    scheduled = scheduled_at if scheduled_at and scheduled_at > now + timedelta(seconds=5) else None
     if analysis is None or aware(analysis.expires_at) < utcnow():
         raise AppError("analysis_expired", "Hasil analisis sudah kedaluwarsa. Analisis ulang URL tersebut.", 404)
 
@@ -62,6 +68,8 @@ async def create_jobs(
             options["cookies"] = saved_cookies
         if saved_headers:
             options["headers"] = saved_headers
+        if max_speed_kbps:
+            options["max_speed_kbps"] = max_speed_kbps
         job_options = options or None
         job = DownloadJob(
             analysis_id=analysis.id,
@@ -74,7 +82,8 @@ async def create_jobs(
             filename=sanitize_filename(item.get("filename") or item["type"], fallback=item["type"]),
             size_total=item.get("size"),
             options=job_options,
-            status="pending",
+            status="scheduled" if scheduled else "pending",
+            scheduled_at=scheduled,
         )
         session.add(job)
         jobs.append(job)
@@ -143,12 +152,15 @@ async def pause_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
 
 
 async def resume_job(session: AsyncSession, job_id: uuid.UUID) -> DownloadJob:
+    """Melanjutkan job yang dijeda, atau memulai job terjadwal sekarang juga."""
     job = await get_job(session, job_id)
-    if job.status != "paused":
-        raise AppError("job_not_paused", "Hanya unduhan yang dijeda yang dapat dilanjutkan.", 409)
+    if job.status not in ("paused", "scheduled"):
+        raise AppError("job_not_paused", "Hanya unduhan yang dijeda atau terjadwal yang dapat dimulai.", 409)
+    action = "started_early" if job.status == "scheduled" else "resumed"
     job.status = "pending"
+    job.scheduled_at = None
     job.error_message = None
-    session.add(DownloadHistory(job_id=job.id, action="resumed"))
+    session.add(DownloadHistory(job_id=job.id, action=action))
     await session.commit()
     return job
 
@@ -157,7 +169,7 @@ async def cancel_job(session: AsyncSession, settings: Settings, job_id: uuid.UUI
     """Membatalkan job. Bila sedang berjalan, runner berhenti pada laporan progres berikutnya
     dan membersihkan file sementaranya; bila antre/dijeda, file parsial dihapus di sini."""
     job = await get_job(session, job_id)
-    if job.status not in ("pending", "paused", *RUNNING_STATUSES):
+    if job.status not in ("scheduled", "pending", "paused", *RUNNING_STATUSES):
         raise AppError("job_not_active", "Unduhan ini sudah selesai atau berhenti.", 409)
     was_running = job.status in RUNNING_STATUSES
     job.status = "cancelled"
@@ -169,6 +181,22 @@ async def cancel_job(session: AsyncSession, settings: Settings, job_id: uuid.UUI
     if not was_running:
         await asyncio.to_thread(remove_partials, settings.temp_dir, job.id)
     return job
+
+
+async def promote_due_jobs(session: AsyncSession) -> list[uuid.UUID]:
+    """Job terjadwal yang waktunya tiba dipindah ke `pending`; ID-nya dikembalikan untuk diantrekan."""
+    now = utcnow()
+    due = (
+        await session.scalars(
+            select(DownloadJob).where(DownloadJob.status == "scheduled", DownloadJob.scheduled_at <= now)
+        )
+    ).all()
+    for job in due:
+        job.status = "pending"
+        session.add(DownloadHistory(job_id=job.id, action="schedule_due"))
+    if due:
+        await session.commit()
+    return [job.id for job in due]
 
 
 def remove_file(settings: Settings, storage_key: str) -> None:
